@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" shape-rendering="crispEdges">
+  <defs>
+    <clipPath id="frame">
+      <rect width="256" height="256" rx="36" shape-rendering="geometricPrecision"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="256" height="256" fill="#131313"/>
+
+    <!-- estelas de velocidad -->
+    <g fill="#8a6f00">
+      <rect x="24" y="56" width="48" height="8"/>
+      <rect x="8" y="80" width="40" height="8"/>
+      <rect x="32" y="112" width="32" height="8"/>
+    </g>
+    <g fill="#ffd400">
+      <rect x="56" y="56" width="16" height="8"/>
+      <rect x="40" y="80" width="8" height="8"/>
+    </g>
+
+    <!-- bloque izquierdo -->
+    <g>
+      <rect x="0" y="176" width="80" height="80" fill="#2a2a2a"/>
+      <g fill="#1d1d1d">
+        <rect x="8" y="208" width="16" height="8"/>
+        <rect x="48" y="216" width="8" height="16"/>
+        <rect x="24" y="232" width="16" height="8"/>
+        <rect x="64" y="240" width="8" height="8"/>
+      </g>
+      <g fill="#3a3a3a">
+        <rect x="32" y="208" width="8" height="8"/>
+        <rect x="8" y="224" width="8" height="8"/>
+        <rect x="56" y="240" width="8" height="8"/>
+      </g>
+      <rect x="0" y="176" width="80" height="16" fill="#ffd400"/>
+      <rect x="0" y="176" width="80" height="4" fill="#ffe866"/>
+      <g fill="#ffd400">
+        <rect x="0" y="192" width="8" height="8"/>
+        <rect x="16" y="192" width="16" height="8"/>
+        <rect x="24" y="200" width="8" height="8"/>
+        <rect x="48" y="192" width="8" height="8"/>
+        <rect x="64" y="192" width="16" height="8"/>
+        <rect x="72" y="200" width="8" height="8"/>
+      </g>
+    </g>
+
+    <!-- bloque derecho, un escalón más bajo -->
+    <g>
+      <rect x="176" y="192" width="80" height="64" fill="#2a2a2a"/>
+      <g fill="#1d1d1d">
+        <rect x="192" y="224" width="16" height="8"/>
+        <rect x="232" y="232" width="8" height="16"/>
+        <rect x="208" y="240" width="8" height="8"/>
+      </g>
+      <g fill="#3a3a3a">
+        <rect x="216" y="224" width="8" height="8"/>
+        <rect x="184" y="240" width="8" height="8"/>
+      </g>
+      <rect x="176" y="192" width="80" height="16" fill="#ffd400"/>
+      <rect x="176" y="192" width="80" height="4" fill="#ffe866"/>
+      <g fill="#ffd400">
+        <rect x="176" y="208" width="8" height="8"/>
+        <rect x="192" y="208" width="16" height="8"/>
+        <rect x="200" y="216" width="8" height="8"/>
+        <rect x="224" y="208" width="8" height="8"/>
+        <rect x="240" y="208" width="16" height="8"/>
+      </g>
+    </g>
+
+    <!-- polvo del despegue -->
+    <g fill="#8a6f00">
+      <rect x="40" y="160" width="8" height="8"/>
+      <rect x="24" y="152" width="8" height="8"/>
+      <rect x="56" y="144" width="8" height="8"/>
+    </g>
+
+    <!-- jugador de bloques en pleno salto -->
+    <g shape-rendering="geometricPrecision" stroke="#131313" stroke-width="4" stroke-linejoin="miter">
+      <!-- brazo lejano (adelante) -->
+      <rect x="-10" y="-6" width="20" height="60" fill="#b08d00" transform="translate(141 79) rotate(-80)"/>
+      <!-- pierna lejana (atrás) -->
+      <rect x="-11" y="-6" width="22" height="64" fill="#b08d00" transform="translate(118 128) rotate(50)"/>
+      <!-- torso -->
+      <rect x="-12" y="-62" width="24" height="66" fill="#ffd400" transform="translate(118 128) rotate(25)"/>
+      <!-- cabeza -->
+      <g transform="translate(144 72) rotate(12)">
+        <rect x="-22" y="-44" width="44" height="44" fill="#ffd400"/>
+        <rect x="-22" y="-44" width="44" height="12" fill="#b08d00" stroke="none"/>
+        <rect x="-22" y="-32" width="12" height="12" fill="#b08d00" stroke="none"/>
+        <rect x="8" y="-24" width="8" height="8" fill="#131313" stroke="none"/>
+        <rect x="-22" y="-44" width="44" height="44" fill="none"/>
+      </g>
+      <!-- pierna cercana (adelante) -->
+      <rect x="-11" y="-6" width="22" height="64" fill="#ffd400" transform="translate(118 128) rotate(-75)"/>
+      <!-- brazo cercano (atrás) -->
+      <rect x="-10" y="-6" width="20" height="60" fill="#ffd400" transform="translate(141 79) rotate(80)"/>
+    </g>
+  </g>
+</svg>
