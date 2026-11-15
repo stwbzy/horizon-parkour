@@ -23,6 +23,9 @@ pub enum Landing {
     Crouch,
     /// Corriendo y agachándose a tiempo: rueda.
     Roll,
+    /// Agarrado a una repisa: la caída se paró con las manos, no contra el suelo. Vanilla sigue
+    /// contando los bloques caídos antes del agarre, y los cobraría al pisar la repisa.
+    Grab,
 }
 
 impl Landing {
@@ -44,6 +47,7 @@ impl Landing {
             Landing::Plain => 1.0,
             Landing::Run => 0.75,
             Landing::Crouch => 0.5,
+            Landing::Grab => 0.0,
             Landing::Roll if distance <= SAFE_ROLL_FALL => 0.0,
             Landing::Roll => 0.15,
         }
@@ -55,6 +59,7 @@ impl Landing {
             Landing::Run => 1,
             Landing::Crouch => 2,
             Landing::Roll => 3,
+            Landing::Grab => 4,
         }
     }
 
@@ -64,6 +69,7 @@ impl Landing {
             1 => Landing::Run,
             2 => Landing::Crouch,
             3 => Landing::Roll,
+            4 => Landing::Grab,
             _ => Landing::Plain,
         }
     }
@@ -74,6 +80,7 @@ impl Landing {
             Landing::Run => "corriendo",
             Landing::Crouch => "agachado",
             Landing::Roll => "roll",
+            Landing::Grab => "agarre",
         }
     }
 }
@@ -96,11 +103,12 @@ mod tests {
         assert_eq!(Landing::Roll.damage_factor(20.0), 0.15);
         assert!(Landing::Run.damage_factor(20.0) > Landing::Crouch.damage_factor(20.0));
         assert_eq!(Landing::Plain.damage_factor(20.0), 1.0);
+        assert_eq!(Landing::Grab.damage_factor(20.0), 0.0);
     }
 
     #[test]
     fn bytes_round_trip_and_unknown_is_plain() {
-        for l in [Landing::Plain, Landing::Run, Landing::Crouch, Landing::Roll] {
+        for l in [Landing::Plain, Landing::Run, Landing::Crouch, Landing::Roll, Landing::Grab] {
             assert_eq!(Landing::from_byte(l.to_byte()), l);
         }
         assert_eq!(Landing::from_byte(200), Landing::Plain);

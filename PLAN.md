@@ -1,6 +1,6 @@
 # Parkour — mod de parkour cinemático para Horizon (Minecraft 26.3 en Rust)
 
-Fecha: 2026-11-14 · Estado: fases 0 a 2 hechas (esqueleto, sensores, aterrizaje y roll); siguiente: fase 3 (mantle y hang)
+Fecha: 2026-11-14 · Estado: fases 0 a 3 hechas (esqueleto, sensores, aterrizaje y roll, mantle y hang); siguiente: fase 4 (vault y slide)
 Mod hermano de `~/Proyectos/horizon-armas` (Arsenal): misma instancia, mismas rutas, mismo flujo de build.
 
 ## 1. Rutas y base técnica (reutilizado de Arsenal)
@@ -189,6 +189,20 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
   servidor comparten proceso y se usa directamente lo decidido por el cliente.
 - Un aterrizaje sólo cuenta si se llega al suelo rápido (vy ≤ −0.45): bajar una escalera de mano no anima nada.
 - Durante el roll (12 ticks) el input se fuerza hacia delante, sin salto ni agachado.
+
+### Notas de la fase 3
+- El juego sólo deja **empujar** al jugador (`push_player`), no colocarlo. El mantle (`mantle.rs`) es un
+  controlador de velocidad: cada tick calcula el desplazamiento deseado y empuja la diferencia con lo que haría
+  la física sola (gravedad 0.08, rozamientos 0.98 / 0.91). Probado contra una simulación en los tests.
+- Agarre: en el aire y en caída libre, repisa a ≤ 2.05 sobre los pies y ≤ 0.3 de distancia, mirándola (≤ 53°),
+  pidiendo avanzar, sin agacharse y sin caer a más de 0.9 b/t. Desde el suelo, con el salto, alcanza 3 bloques.
+- Fases: reach (2 ticks) → pull (0.2 b/t) → over (0.16 b/t). Soltar avanzar durante el pull = colgado (hang);
+  agacharse = soltarse (y no se reagarra hasta tocar suelo). Si no sube en 5 ticks (techo) se rinde.
+- "Caída libre" (`Tracker::free_fall`) = la velocidad vertical baja lo que toca por gravedad. Excluye volar en
+  creativo, élitros y agua, para que los movimientos no salten solos ahí.
+- Vanilla sigue contando los bloques caídos antes del agarre y los cobraría al pisar la repisa: mientras dura el
+  mantle se avisa `Landing::Grab` (daño ×0), igual que los aterrizajes.
+- Pendiente: colgarse de repisas sin sitio encima (el sensor no las da) y shimmy lateral.
 
 ## 9. Riesgos y mitigaciones
 - **Anticheat/vanilla del servidor** corrige movimientos agresivos → velocidades conservadoras, impulsos cortos y configurables.

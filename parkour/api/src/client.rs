@@ -14,6 +14,7 @@ use horizon_client::mod_api::{
 use crate::cinematic::{self, Effect, Pose};
 use crate::config;
 use crate::land::{self, Landing};
+use crate::mantle::{self, End, Mantle, Phase};
 use crate::net;
 use crate::sense::{self, Aabb, Senses, Wall};
 use crate::state::{Input, Move, RUN_SPEED, Tracker};
@@ -33,6 +34,11 @@ const IMPACT_SPEED: f64 = -0.45;
 const LANDING_FRESH: Duration = Duration::from_millis(400);
 /// Empujón hacia delante al empezar a rodar, en bloques por tick.
 const ROLL_PUSH: f64 = 0.1;
+/// Lo que suben y se adelantan las manos agarradas a una repisa, en bloques de la vista.
+const HANDS_UP: f32 = 0.35;
+const HANDS_FORWARD: f32 = 0.15;
+/// Cuánto se acercan las manos a su postura en cada tick.
+const HANDS_EASE: f32 = 0.4;
 
 #[derive(Default)]
 pub struct Client {
@@ -54,6 +60,14 @@ struct Inner {
     effect: Option<(Effect, Instant)>,
     /// El ajuste Cinemática, de 0 a 1.5 (se lee una vez por tick).
     intensity: f32,
+    /// La subida a una repisa en curso.
+    mantle: Option<Mantle>,
+    /// El mantle pide ir agachado este tick.
+    mantle_sneak: bool,
+    /// Tras soltarse de una repisa no se vuelve a agarrar hasta tocar suelo.
+    grab_locked: bool,
+    /// Manos levantadas hacia el borde, de 0 a 1: el tick anterior y éste, para interpolar.
+    hands: [f32; 2],
 }
 
 /// El mundo de la ventana para los sensores. Guarda las cajas ya pedidas: en un tick los
@@ -89,16 +103,23 @@ impl Client {
             config::CINEMATIC.value(stored.as_deref()).parse::<f32>().unwrap_or(100.0) / 100.0;
 
         inner.ask_own_id(host);
-        inner.warn_landing(host);
-        if let Some(fall) = inner.tracker.landed
-            && fall >= land::MIN_FALL
-            && fall_speed <= IMPACT_SPEED
-        {
-            inner.land(host, fall, feet, player.yaw);
+        let mantling = inner.mantle(host, feet, player.yaw);
+        if !mantling {
+            inner.warn_landing(host);
+            if let Some(fall) = inner.tracker.landed
+                && fall >= land::MIN_FALL
+                && fall_speed <= IMPACT_SPEED
+            {
+                inner.land(host, fall, feet, player.yaw);
+            }
         }
+        let raised = inner.mantle.is_some_and(|m| m.phase != Phase::Over);
+        let now = inner.hands[1];
+        inner.hands = [now, now + (f32::from(raised) - now) * HANDS_EASE];
     }
 
     /// Mientras rueda, el jugador sigue hacia delante: no frena, no salta ni se queda agachado.
+    /// Agarrado a una repisa lo mueve el mantle, no las teclas.
     pub fn movement_input(&self, event: &mut MovementInputEvent) {
         let Ok(mut inner) = self.inner.lock() else { return };
         inner.tracker.input = Input {
@@ -111,6 +132,11 @@ impl Client {
             event.forward = 1.0;
             event.jump = false;
             event.sneak = false;
+        } else if inner.mantle.is_some() {
+            event.forward = 0.0;
+            event.strafe = 0.0;
+            event.jump = false;
+            event.sneak = inner.mantle_sneak;
         }
     }
 
@@ -170,6 +196,13 @@ impl Client {
         if let Some(pose) = self.pose() {
             event.y -= pose.hand_drop;
             event.pitch -= pose.hand_pitch;
+        }
+        let Ok(inner) = self.inner.lock() else { return };
+        if inner.intensity > 0.0 {
+            let [before, now] = inner.hands;
+            let raised = before + (now - before) * event.partial.clamp(0.0, 1.0);
+            event.y += HANDS_UP * raised;
+            event.z -= HANDS_FORWARD * raised;
         }
     }
 
@@ -253,6 +286,69 @@ impl Inner {
         }
     }
 
+    /// Agarrarse a una repisa y subir. Devuelve si el mantle manda este tick (entonces no hay
+    /// aterrizaje que decidir).
+    fn mantle(&mut self, host: &mut dyn Host, feet: [f64; 3], yaw: f32) -> bool {
+        if self.tracker.on_ground() {
+            self.grab_locked = false;
+        }
+        let Some(mut mantle) = self.mantle else {
+            let grab = self.senses.ledge.filter(|ledge| {
+                self.tracker.current == Move::Air
+                    && self.tracker.free_fall()
+                    && !self.grab_locked
+                    && mantle::can_grab(
+                        ledge,
+                        sense::forward(yaw),
+                        self.tracker.vel[1],
+                        self.tracker.input,
+                    )
+            });
+            let Some(ledge) = grab else { return false };
+            self.mantle = Some(Mantle::grab(&ledge));
+            self.tracker.hold(Move::Mantle);
+            self.effect = Some((Effect::Grab, Instant::now()));
+            host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 0.7, 0);
+            self.hold_fall(host, true);
+            return true;
+        };
+        let step = mantle.tick(feet, self.tracker.vel, self.tracker.on_ground(), self.tracker.input);
+        host.push_player(step.push.map(|v| v as f32));
+        self.mantle_sneak = step.sneak;
+        if step.over_started {
+            self.effect = Some((Effect::MantleOver, Instant::now()));
+            host.play_local_sound("minecraft:item.armor.equip_leather", feet, 0.8, 1.0, 0);
+        }
+        match step.end {
+            None => {
+                self.mantle = Some(mantle);
+                self.tracker.hold(if step.hanging { Move::Hang } else { Move::Mantle });
+                self.hold_fall(host, false);
+            }
+            Some(end) => {
+                self.mantle = None;
+                self.mantle_sneak = false;
+                self.grab_locked = end != End::Done;
+                self.tracker.stop();
+                self.hold_fall(host, true);
+            }
+        }
+        true
+    }
+
+    /// Mientras cuelga de una repisa, la caída anterior no cuenta: se lo recuerda a quien calcula
+    /// el daño (aquí y en el servidor), ahora si `now` y si no cada poco.
+    fn hold_fall(&mut self, host: &mut dyn Host, now: bool) {
+        self.landing = Some((Landing::Grab, Instant::now()));
+        let (last, age) = self.sent;
+        if now || last != Landing::Grab || age >= LAND_EVERY {
+            let _ = host.net_send_to_server(net::LAND, &[Landing::Grab.to_byte()]);
+            self.sent = (Landing::Grab, 0);
+        } else {
+            self.sent.1 = age.saturating_add(1);
+        }
+    }
+
     fn running(&self) -> bool {
         self.tracker.speed_h() >= RUN_SPEED
     }
@@ -298,7 +394,7 @@ impl Inner {
                 Effect::Roll
             }
             Landing::Crouch => Effect::SoftLanding { strength },
-            Landing::Run | Landing::Plain => Effect::HardLanding { strength },
+            Landing::Run | Landing::Plain | Landing::Grab => Effect::HardLanding { strength },
         };
         self.effect = Some((effect, Instant::now()));
     }

@@ -32,6 +32,10 @@ pub enum Effect {
     SoftLanding { strength: f32 },
     /// Golpe seco contra el suelo.
     HardLanding { strength: f32 },
+    /// Las manos agarran una repisa: tirón corto.
+    Grab,
+    /// Pasar por encima del borde al acabar de subir.
+    MantleOver,
 }
 
 /// Lo que dura la voltereta, en segundos y en ticks.
@@ -58,6 +62,8 @@ impl Effect {
             Effect::Roll => ROLL_SECS,
             Effect::SoftLanding { .. } => 0.55,
             Effect::HardLanding { .. } => 0.45,
+            Effect::Grab => 0.3,
+            Effect::MantleOver => 0.45,
         }
     }
 
@@ -112,6 +118,28 @@ impl Effect {
                     hand_pitch: 15.0 * s,
                 }
             }
+            Effect::Grab => {
+                // El cuerpo se frena de golpe: la cámara cae un poco y mira hacia arriba.
+                let s = kick(u, 0.25);
+                Pose {
+                    spin: 0.0,
+                    pitch: -4.0 * s * k,
+                    roll: 0.0,
+                    drop: 0.15 * s * k.min(1.0),
+                    fov: 1.0 - 0.02 * s * k,
+                    hand_drop: 0.0,
+                    hand_pitch: 0.0,
+                }
+            }
+            Effect::MantleOver => Pose {
+                spin: 0.0,
+                pitch: 5.0 * arc * k,
+                roll: 3.0 * arc * k,
+                drop: 0.25 * arc * k.min(1.0),
+                fov: 1.0 + 0.03 * arc * k,
+                hand_drop: 0.5 * arc,
+                hand_pitch: 25.0 * arc,
+            },
         })
     }
 }
@@ -120,10 +148,12 @@ impl Effect {
 mod tests {
     use super::*;
 
-    const ALL: [Effect; 3] = [
+    const ALL: [Effect; 5] = [
         Effect::Roll,
         Effect::SoftLanding { strength: 1.0 },
         Effect::HardLanding { strength: 1.0 },
+        Effect::Grab,
+        Effect::MantleOver,
     ];
 
     #[test]

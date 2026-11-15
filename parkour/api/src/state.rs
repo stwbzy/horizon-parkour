@@ -54,6 +54,8 @@ pub struct Tracker {
     pub pos: Option<[f64; 3]>,
     /// Bloques por tick, de la diferencia de posiciones.
     pub vel: [f64; 3],
+    /// La velocidad vertical del tick anterior.
+    prev_vy: f64,
     pub input: Input,
     pub current: Move,
     /// Ticks seguidos en el estado actual.
@@ -80,6 +82,13 @@ impl Tracker {
         self.vel[0].hypot(self.vel[2])
     }
 
+    /// En el aire y bajo la gravedad normal: la velocidad vertical baja lo que toca cada tick.
+    /// Volando en creativo, planeando con élitros o dentro del agua no se cumple, y ahí los
+    /// movimientos de parkour no deben saltar solos.
+    pub fn free_fall(&self) -> bool {
+        !self.ground && (-0.12..=-0.03).contains(&(self.vel[1] - self.prev_vy))
+    }
+
     /// Bloques caídos desde el punto más alto del salto o caída en curso.
     pub fn fall_distance(&self) -> f64 {
         self.pos.map_or(0.0, |p| (self.apex - p[1]).max(0.0))
@@ -104,6 +113,7 @@ impl Tracker {
             return;
         }
         let was_airborne = self.pos.is_some() && !self.ground;
+        self.prev_vy = self.vel[1];
         self.pos = Some(pos);
         self.vel = vel;
         self.ground = ground;
@@ -124,6 +134,7 @@ impl Tracker {
         }
         self.sneak_was_down = self.input.sneak;
         self.busy = match self.busy {
+            Some((mv, u32::MAX)) => Some((mv, u32::MAX)),
             Some((mv, left)) if left > 1 => Some((mv, left - 1)),
             _ => None,
         };
@@ -141,6 +152,20 @@ impl Tracker {
         self.busy = Some((mv, ticks));
         self.current = mv;
         self.ticks_in_move = 0;
+    }
+
+    /// Empieza (o cambia a) un movimiento sin duración fija: dura hasta `stop`.
+    pub fn hold(&mut self, mv: Move) {
+        if self.current != mv {
+            self.ticks_in_move = 0;
+        }
+        self.busy = Some((mv, u32::MAX));
+        self.current = mv;
+    }
+
+    /// Acaba el movimiento en curso.
+    pub fn stop(&mut self) {
+        self.busy = None;
     }
 
     fn classify(&self) -> Move {
@@ -241,6 +266,39 @@ mod tests {
         assert_eq!(t.current, Move::Roll);
         t.tick([0.0, 64.0, 0.0], true);
         assert_eq!(t.current, Move::Idle);
+    }
+
+    #[test]
+    fn a_held_move_lasts_until_stopped() {
+        let mut t = Tracker::default();
+        t.hold(Move::Hang);
+        for _ in 0..50 {
+            t.tick([0.0, 64.0, 0.0], false);
+        }
+        assert_eq!(t.current, Move::Hang);
+        t.stop();
+        t.tick([0.0, 64.0, 0.0], false);
+        assert_eq!(t.current, Move::Air);
+    }
+
+    #[test]
+    fn free_fall_tells_gravity_from_flying() {
+        // Un salto: 0.42 hacia arriba y la gravedad de vanilla.
+        let mut t = Tracker::default();
+        t.tick([0.0, 64.0, 0.0], true);
+        let (mut y, mut v) = (64.0, 0.42);
+        for i in 0..6 {
+            y += v;
+            v = (v - 0.08) * 0.98;
+            t.tick([0.0, y, 0.0], false);
+            assert_eq!(t.free_fall(), i > 0, "tick {i}");
+        }
+        // Volando a altura fija, o subiendo a velocidad constante: no.
+        let mut t = Tracker::default();
+        for i in 0..6 {
+            t.tick([0.0, 80.0 + 0.3 * f64::from(i), 0.0], false);
+        }
+        assert!(!t.free_fall());
     }
 
     #[test]
