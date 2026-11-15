@@ -62,8 +62,12 @@ const CLIMB_TICKS: u32 = 6;
 /// Empujón hacia delante al lanzarse en plancha, y el del roll que le sigue (más que el normal).
 const DIVE_PUSH: f64 = 0.08;
 const DIVE_ROLL_PUSH: f64 = 0.18;
-/// Ticks en el aire tras un salto con carrera en los que aún vale lanzarse en plancha.
-const DIVE_TICKS: u32 = 8;
+/// Ticks en el aire tras un salto con carrera en los que aún vale lanzarse en plancha (y sólo
+/// subiendo): más tarde, agacharse es para rodar al caer.
+const DIVE_TICKS: u32 = 4;
+/// Ticks tras un aterrizaje de verdad en los que agacharse no empieza un slide: agacharse al
+/// caer es para rodar, y si llega tarde no debe convertirse en deslizarse.
+const SLIDE_LOCK_TICKS: u32 = 5;
 /// Separación de las manos en el borde (desde el centro) y cuánto se deja atrás una mano al
 /// moverse de lado antes de cambiarla de sitio.
 const GRIP_SPREAD: f64 = 0.3;
@@ -134,6 +138,8 @@ struct Inner {
     slide: Option<Slide>,
     slide_sneak: bool,
     slide_cool: u32,
+    /// Ticks desde el último aterrizaje de una caída de verdad.
+    landed_ago: u32,
     /// Cámara al ras del suelo por el slide, de 0 a 1: el tick anterior y éste.
     sliding: [f32; 2],
     /// Movimiento empezado en `movement_input`, para darle sonido y efecto en el tick.
@@ -256,6 +262,7 @@ impl Client {
             inner.last_wall = None;
             inner.wall_grace = None;
         }
+        inner.landed_ago = inner.landed_ago.saturating_add(1);
         inner.ran_ago = if inner.running() { 0 } else { inner.ran_ago.saturating_add(1) };
 
         let stored = host.setting(crate::NAMESPACE, config::CINEMATIC.key);
@@ -283,6 +290,7 @@ impl Client {
             if let Some(fall) = inner.tracker.landed {
                 // En plancha rueda aunque la caída sea corta.
                 if inner.diving || (fall >= land::MIN_FALL && fall_speed <= IMPACT_SPEED) {
+                    inner.landed_ago = 0;
                     inner.land(host, fall, feet, player.yaw);
                 }
             }
@@ -333,6 +341,15 @@ impl Client {
             inner.jump_queued = true;
         }
         inner.tracker.input = input;
+        if sneak_pressed && !inner.tracker.on_ground() {
+            // El juego mueve al jugador después de esto: si este tick toca suelo, la pulsación
+            // ya cuenta para el aterrizaje (y quien calcula el daño aquí ya lo sabe).
+            inner.tracker.sneak_now();
+            if inner.tracker.fall_distance() >= WARN_FALL {
+                let landing = inner.classify_landing(inner.tracker.fall_distance());
+                inner.landing = Some((landing, Instant::now()));
+            }
+        }
         inner.try_start(input, sneak_pressed);
         if inner.slide.is_some() && input.jump {
             // Slide-jump: sale con la inercia y el salto del sprint.
@@ -598,6 +615,13 @@ impl Client {
                 if inner.diving { "  PLANCHA" } else { "" },
             ),
             format!(
+                "roll: vel máx {:.2}/{:.2}  agachado {}  ventana {}",
+                tracker.recent_speed(),
+                land::ROLL_RUN_SPEED,
+                tracker.since_sneak.map_or("--".to_owned(), |t| format!("hace {t} t")),
+                Landing::sneak_window(tracker.fall_distance()),
+            ),
+            format!(
                 "aterrizaje {landing}  id {}  servidor {}",
                 inner.own_id.map_or("?".to_owned(), |id| id.to_string()),
                 match (inner.own_id.is_some(), inner.moves(), inner.allowed & net::ALLOW_FALL != 0) {
@@ -789,7 +813,9 @@ impl Inner {
             self.started = Some(Move::WallRunUp);
             return;
         }
-        if self.slide_cool == 0 && slide::can_slide(t.on_ground(), t.speed_h(), input, sneak_pressed) {
+        if self.slide_cool == 0
+            && self.landed_ago >= SLIDE_LOCK_TICKS
+            && slide::can_slide(t.on_ground(), t.speed_h(), input, sneak_pressed) {
             self.slide = Some(Slide::start(t.vel, self.flow.bonus()));
             self.slide_sneak = false;
             self.tracker.hold(Move::Slide);
@@ -1164,7 +1190,7 @@ impl Inner {
             && self.assist.air() <= DIVE_TICKS
             && t.since_sneak == Some(0)
             && self.running()
-            && t.vel[1] > -0.3;
+            && t.vel[1] > 0.0;
         if !can {
             return;
         }
@@ -1223,14 +1249,19 @@ impl Inner {
 
     /// Cómo se aterrizaría ahora. Si el servidor no quita daño de caída, siempre a plomo: rodar
     /// sin que sirva de nada engañaría.
-    fn classify_landing(&self) -> Landing {
+    /// `fall`: bloques caídos (o que lleva cayendo).
+    fn classify_landing(&self, fall: f64) -> Landing {
         if self.allowed & net::ALLOW_FALL == 0 {
             return Landing::Plain;
         }
-        if self.diving && self.running() {
-            return Landing::Roll;
-        }
-        Landing::classify(self.running(), self.tracker.since_sneak)
+        // La plancha ya es haberse agachado: rueda aunque la caída sea larga.
+        let since = if self.diving { Some(0) } else { self.tracker.since_sneak };
+        Landing::classify(self.ran_for_landing(), since, fall)
+    }
+
+    /// Venía corriendo para rodar: la velocidad más alta de los últimos ticks, no la del último.
+    fn ran_for_landing(&self) -> bool {
+        self.tracker.recent_speed() >= land::ROLL_RUN_SPEED
     }
 
     fn running(&self) -> bool {
@@ -1246,10 +1277,11 @@ impl Inner {
             }
             return;
         }
-        if self.tracker.fall_distance() < WARN_FALL {
+        let fall = self.tracker.fall_distance();
+        if fall < WARN_FALL {
             return;
         }
-        let landing = self.classify_landing();
+        let landing = self.classify_landing(fall);
         self.landing = Some((landing, Instant::now()));
         let (last, age) = self.sent;
         if landing != last || (landing != Landing::Plain && age >= LAND_EVERY) {
@@ -1262,7 +1294,7 @@ impl Inner {
 
     /// Acaba de tocar suelo tras caer `fall` bloques.
     fn land(&mut self, host: &mut dyn Host, fall: f64, feet: [f64; 3], yaw: f32) {
-        let landing = self.classify_landing();
+        let landing = self.classify_landing(fall);
         self.landing = Some((landing, Instant::now()));
         if landing != self.sent.0 {
             let _ = host.net_send_to_server(net::LAND, &[landing.to_byte()]);

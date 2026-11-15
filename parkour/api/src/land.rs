@@ -4,8 +4,14 @@
 //! aplica en `living_fall` multiplicando el multiplicador de vanilla (así se suma a Feather
 //! Falling y a otros mods en vez de pisarlos).
 
-/// Ticks antes del impacto en los que pulsar agacharse cuenta (0.6 s).
+/// Ticks antes del impacto en los que pulsar agacharse cuenta (0.6 s), y como mucho en las
+/// caídas largas (1 s), donde el suelo se acerca más deprisa y cuesta más acertar.
 pub const SNEAK_WINDOW_TICKS: u32 = 12;
+pub const SNEAK_WINDOW_MAX: u32 = 20;
+/// Velocidad horizontal (la más alta de los últimos ticks, bloques/tick) que cuenta como
+/// llegar corriendo para rodar: menos que esprintar (0.28), más que lo que el servidor exige de
+/// media (0.15) para que no rebaje rolls buenos.
+pub const ROLL_RUN_SPEED: f64 = 0.2;
 /// Caída mínima (bloques) para que el aterrizaje tenga animación. Vanilla hace daño desde 3.
 pub const MIN_FALL: f64 = 2.5;
 /// Hasta esta caída, un roll bien hecho no hace daño.
@@ -29,10 +35,17 @@ pub enum Landing {
 }
 
 impl Landing {
+    /// Ticks antes del impacto en los que vale agacharse, para una caída de `fall` bloques: 12
+    /// hasta 4 bloques, uno más por bloque, hasta 20.
+    pub fn sneak_window(fall: f64) -> u32 {
+        let extra = (fall - 4.0).max(0.0).floor() as u32;
+        (SNEAK_WINDOW_TICKS + extra).min(SNEAK_WINDOW_MAX)
+    }
+
     /// `running`: lleva velocidad de carrera. `since_sneak`: ticks desde que pulsó agacharse en
-    /// el aire, si lo hizo.
-    pub fn classify(running: bool, since_sneak: Option<u32>) -> Landing {
-        let crouched = since_sneak.is_some_and(|t| t <= SNEAK_WINDOW_TICKS);
+    /// el aire, si lo hizo. `fall`: bloques caídos.
+    pub fn classify(running: bool, since_sneak: Option<u32>, fall: f64) -> Landing {
+        let crouched = since_sneak.is_some_and(|t| t <= Landing::sneak_window(fall));
         match (running, crouched) {
             (true, true) => Landing::Roll,
             (false, true) => Landing::Crouch,
@@ -91,10 +104,19 @@ mod tests {
 
     #[test]
     fn sneak_must_be_pressed_inside_the_window() {
-        assert_eq!(Landing::classify(true, Some(3)), Landing::Roll);
-        assert_eq!(Landing::classify(true, Some(SNEAK_WINDOW_TICKS + 1)), Landing::Run);
-        assert_eq!(Landing::classify(false, Some(0)), Landing::Crouch);
-        assert_eq!(Landing::classify(false, None), Landing::Plain);
+        assert_eq!(Landing::classify(true, Some(3), 4.0), Landing::Roll);
+        assert_eq!(Landing::classify(true, Some(SNEAK_WINDOW_TICKS + 1), 4.0), Landing::Run);
+        assert_eq!(Landing::classify(false, Some(0), 4.0), Landing::Crouch);
+        assert_eq!(Landing::classify(false, None, 4.0), Landing::Plain);
+    }
+
+    #[test]
+    fn longer_falls_give_a_longer_window() {
+        assert_eq!(Landing::sneak_window(3.0), SNEAK_WINDOW_TICKS);
+        assert_eq!(Landing::sneak_window(8.5), SNEAK_WINDOW_TICKS + 4);
+        assert_eq!(Landing::sneak_window(40.0), SNEAK_WINDOW_MAX);
+        assert_eq!(Landing::classify(true, Some(16), 10.0), Landing::Roll);
+        assert_eq!(Landing::classify(true, Some(16), 4.0), Landing::Run);
     }
 
     #[test]

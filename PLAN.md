@@ -348,3 +348,14 @@ vault bajo (duración y velocidad de salida) y de la subida vertical (altura y t
 - **Sin huesos en 3ª persona** → ver §6.
 - **Rendimiento**: el sensor de colisión hace pocas consultas por tick (cache por posición de bloque); medir en fase 1.
 - **Sensación (game feel)**: es lo que más tiempo toma; todas las constantes en `config` con valores por defecto y recarga en caliente para iterar sin recompilar.
+
+### Notas del arreglo del roll (0.2.1)
+- La pulsación de agacharse se cuenta en `movement_input` (antes de que el juego mueva al jugador), así que
+  vale también la del tick en que toca suelo; antes se perdía y además arrancaba un slide.
+- Slide bloqueado 5 ticks tras un aterrizaje de verdad.
+- Correr para rodar = velocidad horizontal más alta de los últimos 6 ticks ≥ 0.2 (antes la del último tick ≥ 0.25).
+- Ventana de 12 ticks, +1 por bloque de caída por encima de 4, hasta 20.
+- Plancha sólo en los 4 primeros ticks del salto y subiendo; la plancha siempre acaba en roll.
+- Límite conocido: en servidor dedicado, el aviso de una pulsación en el último tick llega después del paquete
+  de movimiento que calcula el daño. En un solo jugador/LAN propio no pasa. Arreglarlo exigiría aplazar el daño
+  en el servidor y recalcularlo (no hay API para devolver vida); pendiente si molesta en partidas con amigos.

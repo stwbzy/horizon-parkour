@@ -11,9 +11,10 @@ el roll, y añade colgarse y moverse por bordes, tic-tac, plancha, margen al sal
 Sin teclas propias: todo es contextual con avanzar, salto, sprint y agacharse.
 
 - **Aterrizaje**: al caer, correr quita daño, pulsar agacharse en el aire quita más, y las dos cosas a la vez
-  hacen rodar (sin daño hasta 8 bloques).
-- **Plancha**: en un salto con carrera, pulsa agacharse pronto (subiendo o en lo alto) y te lanzas hacia
-  delante; al caer ruedas aunque la caída sea corta, conservando más velocidad que con un roll normal.
+  hacen rodar (sin daño hasta 8 bloques). Vale pulsar hasta el último instante antes de tocar suelo, desde
+  0.6 s antes (hasta 1 s en caídas largas). Justo después de caer, agacharse no empieza un slide.
+- **Plancha**: en un salto con carrera, pulsa agacharse nada más saltar (aún subiendo) y te lanzas hacia
+  delante; al caer ruedas siempre, conservando más velocidad que con un roll normal.
 - **Mantle**: salta hacia una repisa manteniendo avanzar y te agarras al borde y subes a pulso (hasta 3 bloques
   desde el suelo).
 - **Colgarse y moverse por el borde**: suelta avanzar al agarrarte (o agárrate a un borde sin sitio encima) y te

@@ -39,6 +39,8 @@ impl Move {
 /// Velocidad horizontal (bloques/tick) desde la que cuenta como carrera: andar es ~0.216,
 /// esprintar ~0.28.
 pub const RUN_SPEED: f64 = 0.25;
+/// Ticks en los que se recuerda la velocidad horizontal más alta (`recent_speed`).
+const SPEED_MEMORY: usize = 6;
 /// Lo que el jugador pide este tick (`movement_input`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Input {
@@ -69,6 +71,9 @@ pub struct Tracker {
     /// Ticks desde que pulsó agacharse en el aire (no cuenta llevarlo pulsado desde el suelo).
     pub since_sneak: Option<u32>,
     sneak_was_down: bool,
+    /// Velocidad horizontal de los últimos ticks (la más vieja se pisa).
+    speeds: [f64; SPEED_MEMORY],
+    speed_at: usize,
     /// Un movimiento en curso y los ticks que le quedan: manda sobre suelo/aire/carrera.
     busy: Option<(Move, u32)>,
 }
@@ -80,6 +85,20 @@ impl Tracker {
 
     pub fn speed_h(&self) -> f64 {
         self.vel[0].hypot(self.vel[2])
+    }
+
+    /// La velocidad horizontal más alta de los últimos ticks: un golpe contra una pared, soltar
+    /// la tecla un instante o caer en diagonal no borran que venía corriendo.
+    pub fn recent_speed(&self) -> f64 {
+        self.speeds.iter().copied().fold(self.speed_h(), f64::max)
+    }
+
+    /// Pulsó agacharse en el aire justo ahora (desde `movement_input`, antes de que el juego mueva
+    /// al jugador): cuenta ya, sin esperar al tick, por si este mismo tick toca suelo.
+    pub fn sneak_now(&mut self) {
+        if !self.ground {
+            self.since_sneak = Some(0);
+        }
     }
 
     /// En el aire y bajo la gravedad normal: la velocidad vertical baja lo que toca cada tick.
@@ -113,20 +132,26 @@ impl Tracker {
             return;
         }
         let was_airborne = self.pos.is_some() && !self.ground;
+        let pressed = self.input.sneak && !self.sneak_was_down;
         self.prev_vy = self.vel[1];
         self.pos = Some(pos);
         self.vel = vel;
+        self.speeds[self.speed_at] = vel[0].hypot(vel[2]);
+        self.speed_at = (self.speed_at + 1) % SPEED_MEMORY;
         self.ground = ground;
         self.landed = (ground && was_airborne).then(|| (self.apex - pos[1]).max(0.0));
         if ground {
             self.apex = pos[1];
-            // En el tick del aterrizaje aún hace falta saber si se agachó a tiempo.
+            // En el tick del aterrizaje aún hace falta saber si se agachó a tiempo, y la tecla de
+            // este tick se pulsó aún en el aire (el juego lee las teclas antes de moverlo).
             if self.landed.is_none() {
                 self.since_sneak = None;
+            } else if pressed {
+                self.since_sneak = Some(0);
             }
         } else {
             self.apex = self.apex.max(pos[1]);
-            self.since_sneak = if self.input.sneak && !self.sneak_was_down {
+            self.since_sneak = if pressed {
                 Some(0)
             } else {
                 self.since_sneak.map(|t| t.saturating_add(1))
@@ -254,6 +279,39 @@ mod tests {
         assert_eq!(t.since_sneak, Some(1));
         t.tick([0.0, 65.0, 0.0], true);
         assert_eq!(t.since_sneak, None);
+    }
+
+    #[test]
+    fn a_sneak_pressed_in_the_landing_tick_still_counts() {
+        let mut t = Tracker::default();
+        t.tick([0.0, 70.0, 0.0], true);
+        t.tick([0.0, 68.0, 0.0], false);
+        // Pulsa en el último instante: el juego lo lee antes de moverlo y toca suelo ese tick.
+        t.input.sneak = true;
+        t.sneak_now();
+        assert_eq!(t.since_sneak, Some(0));
+        t.tick([0.0, 65.0, 0.0], true);
+        assert_eq!(t.landed, Some(5.0));
+        assert_eq!(t.since_sneak, Some(0));
+        // Agacharse en el suelo, después, no se cuenta como del aire.
+        t.sneak_now();
+        t.tick([0.0, 65.0, 0.0], true);
+        assert_eq!(t.since_sneak, None);
+    }
+
+    #[test]
+    fn the_recent_speed_survives_a_slow_last_tick() {
+        let mut t = Tracker::default();
+        for i in 0..4 {
+            t.tick([f64::from(i) * 0.3, 70.0, 0.0], false);
+        }
+        t.tick([0.95, 69.0, 0.0], true);
+        assert!(t.speed_h() < 0.1);
+        assert!((t.recent_speed() - 0.3).abs() < 1e-9);
+        for _ in 0..SPEED_MEMORY {
+            t.tick([0.95, 69.0, 0.0], true);
+        }
+        assert!(t.recent_speed() < 1e-9);
     }
 
     #[test]
