@@ -3,6 +3,10 @@
 //! El juego sólo deja empujar al jugador (sumar a su velocidad), no colocarlo, así que la subida
 //! es un controlador: cada tick calcula el desplazamiento que quiere y empuja la diferencia con
 //! el que la física daría por sí sola (gravedad y rozamiento del aire de vanilla).
+//!
+//! Colgado (sin pedir avanzar, o en un borde sin sitio para subir) el cuerpo baja a la altura de
+//! colgar y se mueve de lado con izquierda/derecha mientras el borde siga (`Hold`, que mide el
+//! cliente). Saltar pidiendo atrás se impulsa hacia fuera de la pared.
 
 use crate::sense::Ledge;
 use crate::state::Input;
@@ -28,6 +32,14 @@ const STALL_TICKS: u32 = 5;
 const OVER_MAX_TICKS: u32 = 12;
 /// Avance sobre la repisa con el que ya se da por subido aunque no se note suelo.
 const OVER_DISTANCE: f64 = 0.75;
+/// Colgado, los pies quedan esto por debajo del borde (los ojos, un poco por debajo de él).
+pub const HANG_DEPTH: f64 = 1.75;
+/// Lo que se corrige la altura colgado por tick, y la velocidad de lado (bloques por tick).
+const HANG_ADJUST: f64 = 0.06;
+const SHIMMY_SPEED: f64 = 0.085;
+/// Saltar hacia atrás desde el borde: hacia fuera y arriba.
+const JUMP_OFF_OUT: f64 = 0.3;
+const JUMP_OFF_UP: f64 = 0.42;
 
 /// Gravedad y rozamientos por tick de un jugador en el aire (vanilla).
 const GRAVITY: f64 = 0.08;
@@ -52,6 +64,23 @@ pub enum End {
     Dropped,
     /// Algo impide subir.
     Blocked,
+    /// Saltó hacia atrás, fuera de la pared: `Step::push` lleva el impulso.
+    JumpedOff,
+}
+
+/// Lo que hay alrededor del borde agarrado, medido por el cliente cada tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Hold {
+    /// El borde sigue a la izquierda / a la derecha (y cabe el cuerpo).
+    pub left: bool,
+    pub right: bool,
+    /// Aquí se puede subir (hay sitio encima).
+    pub climb: bool,
+}
+
+impl Hold {
+    /// Todo libre: un borde largo con sitio encima.
+    pub const OPEN: Hold = Hold { left: true, right: true, climb: true };
 }
 
 /// Lo que el mantle pide en un tick.
@@ -65,29 +94,45 @@ pub struct Step {
     pub sneak: bool,
     /// Este tick empieza a pasar sobre el borde.
     pub over_started: bool,
+    /// Hacia dónde se mueve de lado colgado: 1 a la derecha, -1 a la izquierda, 0 quieto.
+    pub shimmy: f64,
     pub end: Option<End>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mantle {
     /// Hacia la repisa, unitario.
-    dir: [f64; 2],
+    pub dir: [f64; 2],
     /// Y del borde.
-    top: f64,
+    pub top: f64,
     crouch: bool,
     pub phase: Phase,
     ticks: u32,
     stalled: u32,
     over_ticks: u32,
     over_from: [f64; 2],
+    /// Subiendo a pulso (una vez empezado, sigue aunque el sensor deje de ver la repisa).
+    climbing: bool,
 }
 
 /// Se puede agarrar esta repisa ahora: en el aire, cerca, al alcance de las manos, mirándola,
 /// pidiendo avanzar y sin caer demasiado rápido.
 pub fn can_grab(ledge: &Ledge, facing: [f64; 2], fall_speed: f64, input: Input) -> bool {
-    let toward = -(facing[0] * ledge.normal[0] + facing[1] * ledge.normal[1]);
-    ledge.height <= GRAB_HEIGHT
-        && ledge.distance <= GRAB_DISTANCE
+    can_reach(ledge.height, ledge.distance, ledge.normal, facing, fall_speed, input)
+}
+
+/// Lo mismo para un borde a `height` sobre los pies, a `distance` de una pared de normal `normal`.
+pub fn can_reach(
+    height: f64,
+    distance: f64,
+    normal: [f64; 2],
+    facing: [f64; 2],
+    fall_speed: f64,
+    input: Input,
+) -> bool {
+    let toward = -(facing[0] * normal[0] + facing[1] * normal[1]);
+    height <= GRAB_HEIGHT
+        && distance <= GRAB_DISTANCE
         && toward >= GRAB_FACING
         && fall_speed >= GRAB_FALL_SPEED
         && input.forward > 0.1
@@ -96,24 +141,41 @@ pub fn can_grab(ledge: &Ledge, facing: [f64; 2], fall_speed: f64, input: Input) 
 
 impl Mantle {
     pub fn grab(ledge: &Ledge) -> Mantle {
+        Mantle::hang(ledge.top, ledge.normal, ledge.crouch_only)
+    }
+
+    /// Agarrado a un borde en `top` de una pared de normal `normal`, haya o no sitio encima.
+    pub fn hang(top: f64, normal: [f64; 2], crouch: bool) -> Mantle {
         Mantle {
-            dir: [-ledge.normal[0], -ledge.normal[1]],
-            top: ledge.top,
-            crouch: ledge.crouch_only,
+            dir: [-normal[0], -normal[1]],
+            top,
+            crouch,
             phase: Phase::Reach,
             ticks: 0,
             stalled: 0,
             over_ticks: 0,
             over_from: [0.0; 2],
+            climbing: false,
         }
     }
 
+    /// A la derecha a lo largo del borde (mirando a la pared), unitario.
+    pub fn right(&self) -> [f64; 2] {
+        [-self.dir[1], self.dir[0]]
+    }
+
     /// Un tick: `feet` es la posición, `last` el desplazamiento del tick anterior y `ground` si
-    /// pisa suelo. `input` es lo que pide el jugador (sin tocar).
-    pub fn tick(&mut self, feet: [f64; 3], last: [f64; 3], ground: bool, input: Input) -> Step {
+    /// pisa suelo. `input` es lo que pide el jugador (sin tocar) y `hold` lo que hay alrededor.
+    pub fn tick(&mut self, feet: [f64; 3], last: [f64; 3], ground: bool, input: Input, hold: Hold) -> Step {
         self.ticks += 1;
-        let mut step =
-            Step { push: [0.0; 3], hanging: false, sneak: false, over_started: false, end: None };
+        let mut step = Step {
+            push: [0.0; 3],
+            hanging: false,
+            sneak: false,
+            over_started: false,
+            shimmy: 0.0,
+            end: None,
+        };
         if input.sneak && self.phase != Phase::Over {
             step.end = Some(End::Dropped);
             return step;
@@ -130,10 +192,37 @@ impl Mantle {
         let desired = match self.phase {
             Phase::Reach => [0.0; 3],
             Phase::Pull => {
-                if input.forward <= 0.1 && !input.jump {
+                let climb = (input.forward > 0.1 || input.jump) && (hold.climb || self.climbing);
+                self.climbing = climb;
+                if input.jump && input.forward < -0.1 {
+                    // Salta hacia atrás, lejos de la pared.
+                    step.end = Some(End::JumpedOff);
+                    let desired = [-self.dir[0] * JUMP_OFF_OUT, JUMP_OFF_UP, -self.dir[1] * JUMP_OFF_OUT];
+                    let coast = [last[0] * DRAG_H, (last[1] - GRAVITY) * DRAG_Y, last[2] * DRAG_H];
+                    step.push = [desired[0] - coast[0], desired[1] - coast[1], desired[2] - coast[2]];
+                    return step;
+                }
+                if !climb && ground {
+                    // Colgado, los pies han llegado al suelo: ya no cuelga.
+                    step.end = Some(End::Dropped);
+                    return step;
+                }
+                if !climb {
                     step.hanging = true;
                     self.stalled = 0;
-                    [0.0; 3]
+                    // De lado (izquierda en `strafe` es positivo) mientras el borde siga.
+                    let want = -f64::from(input.strafe);
+                    step.shimmy = if want > 0.1 && hold.right {
+                        1.0
+                    } else if want < -0.1 && hold.left {
+                        -1.0
+                    } else {
+                        0.0
+                    };
+                    let r = self.right();
+                    let v = (self.top - HANG_DEPTH - feet[1]).clamp(-HANG_ADJUST, HANG_ADJUST);
+                    let side = step.shimmy * SHIMMY_SPEED;
+                    [r[0] * side, v, r[1] * side]
                 } else {
                     self.stalled = if last[1] < 0.02 { self.stalled + 1 } else { 0 };
                     if self.stalled > STALL_TICKS {
@@ -204,7 +293,7 @@ mod tests {
         }
 
         fn step(&mut self, mantle: &mut Mantle, input: Input) -> Step {
-            let step = mantle.tick(self.pos, self.last, self.on_ledge(), input);
+            let step = mantle.tick(self.pos, self.last, self.on_ledge(), input, Hold::OPEN);
             for i in 0..3 {
                 self.vel[i] += step.push[i];
             }
@@ -280,16 +369,71 @@ mod tests {
         for _ in 0..4 {
             sim.step(&mut mantle, FORWARD);
         }
-        let y = sim.pos[1];
         for _ in 0..20 {
             let step = sim.step(&mut mantle, IDLE);
             assert!(step.hanging);
             assert_eq!(step.end, None);
         }
-        assert!((sim.pos[1] - y).abs() < 0.25, "se descuelga: {} -> {}", y, sim.pos[1]);
+        let hang = 66.0 - HANG_DEPTH;
+        assert!((sim.pos[1] - hang).abs() < 0.05, "no cuelga a su altura: {}", sim.pos[1]);
+        assert!((sim.pos[0] - 0.5).abs() < 1e-6, "se va de lado: {:?}", sim.pos);
         // Y vuelve a subir al pedir avanzar.
         let ended = (0..40).any(|_| sim.step(&mut mantle, FORWARD).end == Some(End::Done));
         assert!(ended);
+    }
+
+    const RIGHT: Input = Input { forward: 0.0, strafe: -1.0, jump: false, sneak: false };
+
+    /// Cuelga quieto un rato.
+    fn hanging() -> (Mantle, Sim) {
+        let mut mantle = Mantle::grab(&ledge());
+        let mut sim = Sim::new([0.5, 64.2, 0.7], [0.0, -0.2, 0.0]);
+        for _ in 0..15 {
+            sim.step(&mut mantle, IDLE);
+        }
+        (mantle, sim)
+    }
+
+    #[test]
+    fn hanging_moves_sideways_while_the_edge_goes_on() {
+        let (mut mantle, mut sim) = hanging();
+        // Repisa al sur: mirando al sur, la derecha es el oeste (-x).
+        assert_eq!(mantle.right(), [-1.0, 0.0]);
+        let x = sim.pos[0];
+        for _ in 0..10 {
+            assert_eq!(sim.step(&mut mantle, RIGHT).shimmy, 1.0);
+        }
+        assert!(x - sim.pos[0] > 0.6, "se mueve {}", x - sim.pos[0]);
+        assert!((sim.pos[1] - (66.0 - HANG_DEPTH)).abs() < 0.05, "baja o sube: {:?}", sim.pos);
+        // Donde se acaba el borde, se para.
+        let x = sim.pos[0];
+        let stuck = Hold { right: false, ..Hold::OPEN };
+        for _ in 0..5 {
+            let step = mantle.tick(sim.pos, sim.last, false, RIGHT, stuck);
+            assert_eq!(step.shimmy, 0.0);
+            sim.vel = [sim.vel[0] + step.push[0], sim.vel[1] + step.push[1], sim.vel[2] + step.push[2]];
+            sim.pos = [sim.pos[0] + sim.vel[0], sim.pos[1] + sim.vel[1], sim.pos[2] + sim.vel[2]];
+            sim.last = sim.vel;
+            sim.vel = [sim.vel[0] * DRAG_H, (sim.vel[1] - GRAVITY) * DRAG_Y, sim.vel[2] * DRAG_H];
+        }
+        assert!((sim.pos[0] - x).abs() < 0.1, "sigue de lado: {} -> {}", x, sim.pos[0]);
+    }
+
+    #[test]
+    fn with_no_room_above_forward_just_hangs() {
+        let (mut mantle, sim) = hanging();
+        let closed = Hold { climb: false, ..Hold::OPEN };
+        let step = mantle.tick(sim.pos, sim.last, false, FORWARD, closed);
+        assert!(step.hanging && step.end.is_none());
+    }
+
+    #[test]
+    fn jumping_back_pushes_away_from_the_wall() {
+        let (mut mantle, sim) = hanging();
+        let back = Input { forward: -1.0, jump: true, ..IDLE };
+        let step = mantle.tick(sim.pos, sim.last, false, back, Hold::OPEN);
+        assert_eq!(step.end, Some(End::JumpedOff));
+        assert!(step.push[2] < -0.2 && step.push[1] > 0.4, "{:?}", step.push);
     }
 
     #[test]
@@ -304,7 +448,7 @@ mod tests {
     fn a_ceiling_in_the_way_gives_up() {
         let mut mantle = Mantle::grab(&ledge());
         // No sube nunca: el último desplazamiento vertical es siempre 0.
-        let end = (0..30).find_map(|_| mantle.tick([0.5, 64.2, 0.7], [0.0; 3], false, FORWARD).end);
+        let end = (0..30).find_map(|_| mantle.tick([0.5, 64.2, 0.7], [0.0; 3], false, FORWARD, Hold::OPEN).end);
         assert_eq!(end, Some(End::Blocked));
     }
 

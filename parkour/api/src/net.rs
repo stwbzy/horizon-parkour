@@ -3,14 +3,15 @@
 
 /// Versión del protocolo entre las dos mitades. Cambia cuando cambian los mensajes o lo que el
 /// servidor acepta; cliente y servidor deben tener la misma.
-pub const PROTOCOL: u8 = 1;
+pub const PROTOCOL: u8 = 2;
 
 /// Cliente → servidor, `[PROTOCOL]`: "tengo el mod, dime mi id de entidad". Se repite hasta
 /// recibir `ID`.
 pub const HELLO: &str = "parkour:hello";
 
 /// Servidor → cliente: la bienvenida (`Welcome`): el id de red del jugador (i32, little endian),
-/// la versión del protocolo del servidor y sus permisos. `living_fall` sólo da ids, y el cliente
+/// la versión del protocolo del servidor, sus permisos y el UUID del jugador (u128, little
+/// endian; con él el cliente encuentra su skin para los brazos al colgarse). `living_fall` sólo da ids, y el cliente
 /// no tiene otra forma de saber cuál es el suyo. Sin bienvenida, el cliente no hace parkour.
 pub const ID: &str = "parkour:id";
 
@@ -25,18 +26,27 @@ pub struct Welcome {
     pub id: u32,
     pub protocol: u8,
     pub flags: u8,
+    pub uuid: u128,
 }
 
 impl Welcome {
-    pub fn encode(self) -> [u8; 6] {
-        let id = (self.id as i32).to_le_bytes();
-        [id[0], id[1], id[2], id[3], self.protocol, self.flags]
+    pub fn encode(self) -> Vec<u8> {
+        let mut out = (self.id as i32).to_le_bytes().to_vec();
+        out.extend([self.protocol, self.flags]);
+        out.extend(self.uuid.to_le_bytes());
+        out
     }
 
+    /// Una bienvenida de la versión 1 (sin UUID) también se lee: así el cliente ve que el
+    /// servidor tiene otra versión.
     pub fn decode(data: &[u8]) -> Option<Welcome> {
-        let [a, b, c, d, protocol, flags] = data.try_into().ok()?;
-        let id = decode_id(&[a, b, c, d])?;
-        Some(Welcome { id, protocol, flags })
+        let (head, uuid) = match data.len() {
+            6 => (data, 0),
+            22 => (&data[..6], u128::from_le_bytes(data[6..].try_into().ok()?)),
+            _ => return None,
+        };
+        let id = decode_id(&head[..4])?;
+        Some(Welcome { id, protocol: head[4], flags: head[5], uuid })
     }
 
     pub fn allows(self, flag: u8) -> bool {
@@ -76,10 +86,13 @@ mod tests {
 
     #[test]
     fn a_welcome_round_trips() {
-        let w = Welcome { id: 77, protocol: PROTOCOL, flags: ALLOW_MOVES };
+        let w = Welcome { id: 77, protocol: PROTOCOL, flags: ALLOW_MOVES, uuid: 0xABCD_0000_1234 };
         assert_eq!(Welcome::decode(&w.encode()), Some(w));
         assert!(w.allows(ALLOW_MOVES) && !w.allows(ALLOW_FALL));
         assert_eq!(Welcome::decode(&encode_id(77)), None);
+        // Una de la versión 1 se lee, sin UUID.
+        let old = [77, 0, 0, 0, 1, ALLOW_MOVES];
+        assert_eq!(Welcome::decode(&old), Some(Welcome { id: 77, protocol: 1, flags: ALLOW_MOVES, uuid: 0 }));
         assert_eq!(hello_protocol(&[]), 0);
         assert_eq!(hello_protocol(&[PROTOCOL]), PROTOCOL);
     }

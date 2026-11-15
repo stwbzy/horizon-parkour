@@ -1,6 +1,6 @@
 # Parkour — mod de parkour cinemático para Horizon (Minecraft 26.3 en Rust)
 
-Fecha: 2026-11-14 · Estado: fases 0 a 7 hechas; versión preliminar 0.1.0 publicada. Siguiente: pruebas en el juego y ajustes (fases 3 a 7 sin probar a fondo)
+Fecha: 2026-11-14 · Estado: fases 0 a 8 hechas (0.1.0 probada en el juego; 0.2.0 sin probar). Siguiente: probar la fase 8 en el juego y publicar la 0.2.0
 Mod hermano de `~/Proyectos/horizon-armas` (Arsenal): misma instancia, mismas rutas, mismo flujo de build.
 
 ## 1. Rutas y base técnica (reutilizado de Arsenal)
@@ -151,6 +151,7 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
 | 5 | **Wall-run lateral y vertical** + wall jump | Pasillo con paredes; cadenas de movimientos |
 | 6 | Capa cinemática completa (curvas, sonido, partículas) + opcional cuerpo 3ª persona | Comparación visual; rendimiento |
 | 7 | Multijugador (LAN + servidor dedicado), anticheat, config, empaquetado y release | Dos clientes, `logs/anticheat.log` limpio |
+| 8 | Pulido (wall-run vertical, vault bajo, roll) + margen al saltar, inercia de cadena, colgarse y shimmy, tic-tac, sonidos y plancha | Mismas pruebas, comparando con 0.1.0 |
 
 ## 8. Decisiones (confirmadas el 2026-11-14)
 
@@ -269,6 +270,77 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
   servidor mande él los empujes (lo que la doc recomienda) haría los movimientos lentos con latencia; no en v1.
 - **Servidor dedicado**: `native-build parkour --server-output DIR` compila el motor con el mod (comprobado).
 - **Release**: `parkour.hnmod` adjunto a la release de GitHub (lo que instala "Add from GitHub"); sin `.hmod`.
+
+### Plan de la fase 8 (pulido tras la primera prueba)
+Prueba del usuario (2026-11-14): todo funciona y es divertido. A mejorar: el wall-run vertical se siente lento y
+la mano sólo se levanta; el vault de 1 bloque es lento; en el roll la vuelta de cámara se ve rara y la mano sigue
+en pantalla (se encoge pero no se va).
+
+**8.1 Roll** (`cinematic.rs`, `client.rs`)
+- Hoy la cámara gira 360° sobre el propio ojo con `smoothstep` (lenta al empezar, ~900°/s en medio) y la bajada
+  va por separado: parece una cabeza girando en un pincho. Nuevo: giro alrededor del centro del cuerpo hecho
+  bola (~0.5 sobre el suelo), así el ojo avanza, baja y vuelve a subir como en una voltereta de verdad; curva que
+  arranca rápido con el impacto y frena al final (ease-out), con los últimos ~0.1 s para incorporarse. La cámara
+  nunca baja de 0.3 sobre el suelo.
+- Mano: se recoge hacia abajo en el primer 15 % y en el tramo central se oculta del todo (`render_hand` →
+  cancelar); vuelve desde abajo al final. También con la cinemática por debajo del 100 %.
+
+**8.2 Vault rápido** (`vault.rs`, `cinematic.rs`, `client.rs`) — obstáculos de ≤ 1.2 bloques
+- Hoy: sube y pasa en plano a la velocidad de la carrera (0.28–0.4): ~10 ticks flotando a altura fija.
+- Nuevo: subida más rápida (0.5 b/t), pasada en arco (pequeño salto que sube y cae) en vez de plana, +20 % de
+  velocidad al apoyar las manos (0.34–0.45) y se suelta en cuanto el cuerpo pasa el borde de atrás, conservando la
+  inercia y el sprint. Objetivo: valla de 1 bloque en ~6 ticks (0.3 s) en lugar de ~10.
+- Los obstáculos altos (1.2–1.55) siguen como ahora, algo más ágiles.
+- Cámara y mano: efecto más corto (0.35 s); la mano principal se apoya (baja y adelante) al empezar la pasada y
+  sale por abajo al pasar; pico de FOV al soltar.
+
+**8.3 Wall-run vertical** (`wallrun.rs`, `cinematic.rs`, `client.rs`)
+- Hoy: 0.42 b/t frenando 0.032 por tick, ~2.5 bloques en 0.65 s; la mano sube y se queda.
+- Nuevo: arranque explosivo, 0.54 b/t frenando 0.05 por tick: ~3.2 bloques en 0.55 s. Pisadas cada 3 ticks
+  (antes 6) con un golpe de cámara pequeño en cada una; mirada hacia arriba al despegar (−6°) y pulso de FOV.
+- Manos que trepan: en cada zancada la mano sube y se adelanta hasta la pared y luego tira hacia abajo al pasar el
+  cuerpo; si la otra mano se dibuja, alternan.
+
+**Verificación**: tests de curvas (mano oculta en el centro del roll, cámara sobre el suelo, giro entero), del
+vault bajo (duración y velocidad de salida) y de la subida vertical (altura y ticks); prueba en el juego.
+
+### Notas de la fase 8
+- Pedido tras la prueba (2026-11-14), además de 8.1–8.3: margen al saltar, inercia de cadena, colgarse y moverse
+  por el borde (que se vea claro que cuelgas: brazos de Minecraft y el objeto en la mano escondido), tic-tac,
+  sonidos de los movimientos y plancha.
+- **Roll** (`cinematic.rs`): 0.7 s; la cámara gira alrededor de un centro a 0.8 sobre los pies (radios 0.45
+  vertical y 0.3 horizontal, `Pose::lunge` por `camera_pose`), el ojo nunca baja de 0.35 sobre el suelo; la vuelta
+  (`roll_angle`) acaba al 82 % y deja tiempo para incorporarse. Las manos se recogen y se cancelan con
+  `render_hand` en el centro (`Pose::hide_hands`).
+- **Vault rápido** (`vault.rs`, hasta 1.2 bloques y sin pasar agachado ni acabar encima): sube a 0.55 b/t, pasa
+  a 1.2× la carrera (0.34–0.46) en un arco (0.12 b/t, −0.04 por tick, sin bajar del borde) y suelta al pasar.
+  Bloque de 1 desde 0.7: 7 ticks. Efecto `Vault { quick }` de 0.32 s con la mano apoyándose (`hand_forward`).
+- **Wall-run vertical**: 0.6 b/t frenando 0.055 por tick (~3 bloques en 10 ticks). Pisadas cada 3 ticks con
+  golpe de cámara; efecto `ClimbStart`; manos trepando a contratiempo (`climb_hand`, ciclo de 6 ticks).
+- **Margen al saltar** (`assist.rs`): coyote de 3 ticks tras salir de un borde sin saltar (empuje de salto de
+  vanilla + 0.2 del sprint); salto guardado 5 ticks para vault, subida y tic-tac; el vault y la subida valen hasta
+  6 ticks en el aire mientras no se caiga a más de 0.1 b/t.
+- **Inercia de cadena** (`flow.rs`): +6 % por movimiento hasta 3 (+18 %) en vault, slide, wall-run lateral,
+  tic-tac y roll, y un empuje en el suelo que lleva la carrera a 0.28 × bonus. Se pierde a los 30 ticks en el
+  suelo sin hacer nada o por debajo de 0.2 b/t.
+- **Colgarse y shimmy** (`mantle.rs`, `sense::edge`, `arms.rs`): colgado, los pies a 1.75 bajo el borde; de lado
+  a 0.085 b/t mientras `sense::edge` vea el mismo borde 0.4 más allá y quepa el cuerpo (`Hold`, medido por el
+  cliente). Se cuelga también de bordes sin sitio para subir. Atrás + saltar: 0.3 fuera y 0.42 arriba. Con los pies
+  en el suelo deja de colgar.
+- **Brazos**: la mano de vanilla no se puede anclar al mundo ni dibujar vacía con un objeto en la mano, así que se
+  cancela (`render_hand`) y se dibujan dos brazos con la skin del jugador en `world_submit` (`world_quad` con el
+  sprite de la skin del atlas: `client_profiles`, por el UUID que ahora manda la bienvenida, protocolo 2; si no,
+  Steve). Manos fijas en el borde, cambiando de sitio mano sobre mano al moverse; hombros relativos a la cámara;
+  luz de `Host::light`. No se dibujan en tercera persona (cámara a más de 1 bloque del ojo). Cada cara va en los
+  dos sentidos por si el motor descarta caras traseras.
+- **Tic-tac** (`wallrun::can_tic_tac`): en el aire, pared delante a ≤ 0.45 mirándola en diagonal (coseno
+  0.3–0.82), yendo hacia ella y a lo largo; salto (o guardado) → a lo largo ≥ 0.28 × bonus, 0.3 fuera, 0.45
+  arriba. Cuenta como pared usada. Efecto `TicTac` (se ladea hacia donde sale).
+- **Plancha**: en un salto con carrera, agacharse en los primeros 8 ticks sin caer a más de 0.3 b/t → empuje 0.08
+  y efecto `Dive`; al tocar suelo rueda siempre (roll con empuje 0.18). Necesita `ALLOW_FALL`.
+- **Sonidos**: `fx::WHOOSH` (`entity.player.attack.sweep`, agudo y bajo) en wall jump, tic-tac, vault, subida y
+  plancha; `fx::CLOTH` al agarrarse, plancha y saltos; golpecitos del material al mover cada mano colgado.
+- **Protocolo 2**: la bienvenida lleva el UUID. Cliente y servidor 0.2.0 deben ir juntos.
 
 ## 9. Riesgos y mitigaciones
 - **Anticheat/vanilla del servidor** corrige movimientos agresivos → velocidades conservadoras, impulsos cortos y configurables.

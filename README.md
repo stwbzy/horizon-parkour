@@ -3,8 +3,8 @@
 Mod nativo para [Horizon](https://github.com/horizon-rust/horizon) (Minecraft 26.3 en Rust): movimiento de
 parkour al estilo Mirror's Edge, con cámara y manos animadas en primera persona.
 
-**Estado: versión preliminar (0.1.0).** Todos los movimientos de la v1 están hechos, pero varios aún no se han
-probado a fondo dentro del juego: espera ajustes de velocidades y sensaciones.
+**Estado: 0.2.0 en pruebas.** La 0.1.0 se probó en el juego; la 0.2.0 pule el wall-run vertical, el vault bajo y
+el roll, y añade colgarse y moverse por bordes, tic-tac, plancha, margen al saltar e inercia de cadena.
 
 ## Movimientos
 
@@ -12,26 +12,37 @@ Sin teclas propias: todo es contextual con avanzar, salto, sprint y agacharse.
 
 - **Aterrizaje**: al caer, correr quita daño, pulsar agacharse en el aire quita más, y las dos cosas a la vez
   hacen rodar (sin daño hasta 8 bloques).
+- **Plancha**: en un salto con carrera, pulsa agacharse pronto (subiendo o en lo alto) y te lanzas hacia
+  delante; al caer ruedas aunque la caída sea corta, conservando más velocidad que con un roll normal.
 - **Mantle**: salta hacia una repisa manteniendo avanzar y te agarras al borde y subes a pulso (hasta 3 bloques
-  desde el suelo). Suelta avanzar para quedarte colgado; agáchate para soltarte.
+  desde el suelo).
+- **Colgarse y moverse por el borde**: suelta avanzar al agarrarte (o agárrate a un borde sin sitio encima) y te
+  quedas colgado, con los brazos de tu skin agarrados al borde y lo que llevas en la mano guardado. Izquierda y
+  derecha te mueven por el borde mientras siga; avanzar o saltar sube si hay sitio; agacharse te suelta; atrás +
+  saltar te impulsa lejos de la pared. Las primeras veces se explica abajo en pantalla.
 - **Vault**: corriendo hacia un obstáculo bajo (de un escalón a 1.5 bloques, vallas incluidas), salta y lo pasas
-  apoyando las manos sin perder la carrera. Si es hondo, acabas de pie encima.
+  apoyando las manos sin perder la carrera. Los de hasta 1.2 bloques se pasan con un vault rápido: en arco y
+  saliendo algo más rápido. Si es hondo, acabas de pie encima.
 - **Slide**: corriendo, pulsa agacharse y te deslizas unos 5 bloques (por huecos de 1.5 también). Salta a media
   deslizada para salir con la inercia.
 - **Wall-run lateral**: salta corriendo junto a una pared (mirando hacia donde vas, manteniendo avanzar) y corres
   por ella con la cámara inclinada, unos 8 bloques.
-- **Wall-run vertical**: salta corriendo de frente a una pared y subes unos 2.5 bloques; si el borde queda al
-  alcance, te agarras y subes (mantle).
+- **Wall-run vertical**: salta corriendo de frente a una pared y subes unos 3 bloques en medio segundo, trepando
+  con las manos; si el borde queda al alcance, te agarras y subes (mantle).
 - **Wall jump**: salta durante un wall-run (o justo al soltarte) y te impulsas hacia fuera; puedes encadenar
   hasta 4 paredes distintas sin tocar el suelo.
+- **Tic-tac**: salta hacia una pared en diagonal y, ya en el aire junto a ella, vuelve a saltar: pisas la pared
+  y sales impulsado hacia un lado (para esquivar un hueco o cambiar de dirección).
+- **Margen al saltar**: puedes saltar justo después de salir de un borde, y un salto pulsado un poco antes de
+  llegar a un obstáculo o a una pared sigue valiendo para el vault, la subida o el tic-tac.
+- **Inercia de cadena**: encadenar movimientos sin pararte (vault, slide, wall-run, wall jump, tic-tac, roll,
+  mantle) te da un poco más de velocidad, hasta +18 %. Se pierde al pararte o al correr un rato sin hacer nada.
 
 Cada movimiento tiene su animación de cámara y manos en primera persona, suena según el material del bloque que
 tocas (madera, piedra, arena…) y levanta polvo de ese bloque. Ir más rápido que esprintando abre un poco el FOV.
 En Options > Mods > Parkour: intensidad de la cinemática (0–150 %), partículas sí/no y HUD de depuración.
 
 El diseño completo y las fases están en [PLAN.md](PLAN.md).
-
-Sin teclas propias: todo es contextual con salto, sprint y agacharse.
 
 ## Instalación
 
@@ -44,7 +55,7 @@ Es un mod **nativo** (código Rust que el launcher compila dentro del juego); no
    `horizon-launcher native-build --trust-native-code`.) La primera compilación tarda: el launcher descarga Rust
    y la fuente de Horizon.
 2. Abre el juego, ve a **Opciones → Mods**, activa **Parkour** y reinicia.
-3. Al entrar a un mundo verás en el chat `[Parkour 0.1.0] Este servidor tiene Parkour…`.
+3. Al entrar a un mundo verás en el chat `[Parkour 0.2.0] Este servidor tiene Parkour…`.
 
 Para actualizar: `horizon-launcher mods update-github` y vuelve a compilar.
 

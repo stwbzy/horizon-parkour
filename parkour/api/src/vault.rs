@@ -4,6 +4,9 @@
 //! desplazamiento que quiere y el que daría la física sola. Sube el cuerpo hasta el borde a la vez
 //! que llega a él, pasa por encima a la velocidad de la carrera y suelta: al otro lado cae con la
 //! inercia; si el obstáculo es hondo, acaba de pie encima.
+//!
+//! Los obstáculos bajos (hasta `QUICK_HEIGHT`) se pasan con un vault rápido: sube antes, pasa en
+//! un pequeño arco en vez de en plano y sale algo más rápido de lo que llegó.
 
 use crate::sense::Obstacle;
 use crate::state::{Input, RUN_SPEED};
@@ -19,6 +22,17 @@ const RISE_SPEED: f64 = 0.42;
 const MIN_SPEED: f64 = 0.28;
 const MAX_SPEED: f64 = 0.4;
 const MAX_TICKS: u32 = 24;
+
+/// Obstáculos hasta esta altura (bloques sobre los pies) se pasan con el vault rápido.
+pub const QUICK_HEIGHT: f64 = 1.2;
+/// Vault rápido: subida, impulso al apoyar las manos (sobre la velocidad de llegada) y sus
+/// límites, y el arco de la pasada (sube `HOP` b/t y pierde `HOP_FALL` cada tick).
+const QUICK_RISE: f64 = 0.55;
+const QUICK_BOOST: f64 = 1.2;
+const QUICK_MIN_SPEED: f64 = 0.34;
+const QUICK_MAX_SPEED: f64 = 0.46;
+const HOP: f64 = 0.12;
+const HOP_FALL: f64 = 0.04;
 /// Ticks seguidos sin avanzar (algo en medio) antes de rendirse.
 const STALL_TICKS: u32 = 4;
 
@@ -65,8 +79,11 @@ pub struct Vault {
     pub onto: bool,
     crouch: bool,
     speed: f64,
+    /// Vault rápido (obstáculo bajo).
+    pub quick: bool,
     pub phase: Phase,
     ticks: u32,
+    over_ticks: u32,
     stalled: u32,
 }
 
@@ -82,8 +99,15 @@ pub fn can_vault(ob: &Obstacle, facing: [f64; 2], speed_h: f64, input: Input) ->
 
 impl Vault {
     /// Empieza con los pies en `feet`, mirando en `dir` (la dirección con la que se midió el
-    /// obstáculo) y a `speed_h` bloques por tick.
-    pub fn start(ob: &Obstacle, feet: [f64; 3], dir: [f64; 2], speed_h: f64) -> Vault {
+    /// obstáculo) y a `speed_h` bloques por tick. `bonus` multiplica la velocidad (la inercia de
+    /// encadenar movimientos, 1 sin ella).
+    pub fn start(ob: &Obstacle, feet: [f64; 3], dir: [f64; 2], speed_h: f64, bonus: f64) -> Vault {
+        let quick = ob.height <= QUICK_HEIGHT && !ob.onto && !ob.crouch;
+        let speed = if quick {
+            (speed_h * QUICK_BOOST * bonus).clamp(QUICK_MIN_SPEED, QUICK_MAX_SPEED * bonus)
+        } else {
+            (speed_h * bonus).clamp(MIN_SPEED, MAX_SPEED * bonus)
+        };
         Vault {
             dir,
             start: [feet[0], feet[2]],
@@ -92,9 +116,11 @@ impl Vault {
             clear: ob.clear,
             onto: ob.onto,
             crouch: ob.crouch,
-            speed: speed_h.clamp(MIN_SPEED, MAX_SPEED),
+            speed,
+            quick,
             phase: Phase::Up,
             ticks: 0,
+            over_ticks: 0,
             stalled: 0,
         }
     }
@@ -118,8 +144,9 @@ impl Vault {
         let (h, v) = match self.phase {
             Phase::Up => {
                 // Llega a la cara del obstáculo justo cuando los pies pasan el borde.
-                let rise = remaining.min(RISE_SPEED);
-                let ticks_left = (remaining / RISE_SPEED).ceil().max(1.0);
+                let rise_speed = if self.quick { QUICK_RISE } else { RISE_SPEED };
+                let rise = remaining.min(rise_speed);
+                let ticks_left = (remaining / rise_speed).ceil().max(1.0);
                 let to_wall = (self.wall - progress).max(0.0);
                 if self.ticks > 1 && last[1] < 0.05 {
                     self.stalled += 1;
@@ -139,7 +166,15 @@ impl Vault {
                 } else {
                     self.stalled = 0;
                 }
-                (self.speed, remaining.clamp(-0.05, 0.1))
+                self.over_ticks += 1;
+                let v = if self.quick {
+                    // Un pequeño arco, sin bajar nunca de la cara de arriba del obstáculo.
+                    let arc = HOP - HOP_FALL * f64::from(self.over_ticks - 1);
+                    arc.max(self.top + 0.03 - feet[1])
+                } else {
+                    remaining.clamp(-0.05, 0.1)
+                };
+                (self.speed, v)
             }
         };
         if self.stalled > STALL_TICKS {
@@ -174,21 +209,52 @@ mod tests {
         }
     }
 
-    /// Física de vanilla con suelo en y = 64 y la valla.
+    /// Un bloque al sur: cara en z = 1, fondo en z = 2, 1 de alto. Los pies en z = 0.
+    fn block() -> Obstacle {
+        Obstacle {
+            height: 1.0,
+            top: 65.0,
+            distance: 0.7,
+            normal: [0.0, -1.0],
+            clear: 2.325,
+            onto: false,
+            crouch: false,
+        }
+    }
+
+    /// Física de vanilla con suelo en y = 64 y el obstáculo entre `z0` y `z1` hasta `top`.
     struct Sim {
         pos: [f64; 3],
         vel: [f64; 3],
         last: [f64; 3],
+        z0: f64,
+        z1: f64,
+        top: f64,
     }
 
     impl Sim {
         fn running() -> Sim {
-            // Corriendo al sur a 0.28 por tick en suelo.
-            Sim { pos: [0.5, 64.0, 0.5], vel: [0.0, -0.0784, 0.28 * DRAG_GROUND], last: [0.0, 0.0, 0.28] }
+            // Corriendo al sur a 0.28 por tick en suelo, hacia la valla.
+            Sim {
+                pos: [0.5, 64.0, 0.5],
+                vel: [0.0, -0.0784, 0.28 * DRAG_GROUND],
+                last: [0.0, 0.0, 0.28],
+                z0: 1.375,
+                z1: 1.625,
+                top: 65.5,
+            }
+        }
+
+        fn running_at_block() -> Sim {
+            Sim { pos: [0.5, 64.0, 0.0], z0: 1.0, z1: 2.0, top: 65.0, ..Sim::running() }
         }
 
         fn ground(&self) -> bool {
-            self.pos[1] <= 64.0 + 1e-9
+            let on_top = self.pos[1] <= self.top + 1e-9
+                && self.pos[1] >= self.top - 1e-9
+                && self.pos[2] > self.z0 - 0.3
+                && self.pos[2] < self.z1 + 0.3;
+            self.pos[1] <= 64.0 + 1e-9 || on_top
         }
 
         fn step(&mut self, vault: &mut Vault) -> Step {
@@ -202,10 +268,17 @@ mod tests {
                 next[1] = 64.0;
                 self.vel[1] = 0.0;
             }
-            let inside = |z: f64| z > 1.075 && z < 1.925;
-            if next[1] < 65.5 && inside(next[2]) {
-                next[2] = if self.pos[2] <= 1.075 { 1.075 } else { next[2] };
-                self.vel[2] = 0.0;
+            let (near, far) = (self.z0 - 0.3, self.z1 + 0.3);
+            let inside = |z: f64| z > near && z < far;
+            if next[1] < self.top && inside(next[2]) {
+                if self.pos[1] >= self.top {
+                    // Cae sobre el obstáculo: se queda encima.
+                    next[1] = self.top;
+                    self.vel[1] = 0.0;
+                } else {
+                    next[2] = if self.pos[2] <= near { near } else { next[2] };
+                    self.vel[2] = 0.0;
+                }
             }
             self.last = [next[0] - self.pos[0], next[1] - self.pos[1], next[2] - self.pos[2]];
             self.pos = next;
@@ -229,7 +302,7 @@ mod tests {
     #[test]
     fn a_running_vault_clears_the_fence_and_keeps_its_speed() {
         let mut sim = Sim::running();
-        let mut vault = Vault::start(&fence(), sim.pos, [0.0, 1.0], 0.28);
+        let mut vault = Vault::start(&fence(), sim.pos, [0.0, 1.0], 0.28, 1.0);
         let mut over = false;
         let mut end = None;
         for tick in 0..30 {
@@ -249,8 +322,41 @@ mod tests {
     }
 
     #[test]
+    fn a_low_block_is_vaulted_quickly_and_faster_than_the_run() {
+        let mut sim = Sim::running_at_block();
+        let mut vault = Vault::start(&block(), sim.pos, [0.0, 1.0], 0.28, 1.0);
+        assert!(vault.quick);
+        let mut path = Vec::new();
+        let (end, ticks) = (0..30)
+            .find_map(|tick| {
+                let step = sim.step(&mut vault);
+                path.push(sim.pos);
+                step.end.map(|e| (e, tick))
+            })
+            .expect("termina");
+        assert_eq!(end, End::Done);
+        assert!(ticks <= 8, "tarda {ticks} ticks");
+        assert!(sim.pos[2] >= 2.3, "no ha pasado: {:?}", sim.pos);
+        assert!(sim.last[2] >= 0.3, "sale lento: {:?}", sim.last);
+        // Pasa en arco: sube por encima de donde empezó a pasar.
+        let peak = path.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+        assert!(peak > 65.15, "pasa en plano: {peak}");
+        // Y no llega a pisar el bloque.
+        assert!(path.iter().all(|p| !(p[1] <= 65.0 + 1e-6 && p[2] > 0.7 && p[2] < 2.3)), "{path:?}");
+        // El de la valla (1.5) sigue siendo el normal.
+        assert!(!Vault::start(&fence(), sim.pos, [0.0, 1.0], 0.28, 1.0).quick);
+    }
+
+    #[test]
+    fn the_chain_bonus_makes_it_faster() {
+        let slow = Vault::start(&block(), [0.5, 64.0, 0.0], [0.0, 1.0], 0.3, 1.0);
+        let fast = Vault::start(&block(), [0.5, 64.0, 0.0], [0.0, 1.0], 0.3, 1.15);
+        assert!(fast.speed > slow.speed);
+    }
+
+    #[test]
     fn something_in_the_way_gives_up() {
-        let mut vault = Vault::start(&fence(), [0.5, 64.0, 0.5], [0.0, 1.0], 0.28);
+        let mut vault = Vault::start(&fence(), [0.5, 64.0, 0.5], [0.0, 1.0], 0.28, 1.0);
         // No se mueve nunca.
         let end = (0..30).find_map(|_| vault.tick([0.5, 64.0, 0.5], [0.0; 3], true).end);
         assert_eq!(end, Some(End::Blocked));
@@ -258,7 +364,7 @@ mod tests {
 
     #[test]
     fn a_window_is_crossed_crouching() {
-        let mut vault = Vault::start(&Obstacle { crouch: true, ..fence() }, [0.5, 64.0, 0.5], [0.0, 1.0], 0.3);
+        let mut vault = Vault::start(&Obstacle { crouch: true, ..fence() }, [0.5, 64.0, 0.5], [0.0, 1.0], 0.3, 1.0);
         assert!(vault.tick([0.5, 64.0, 0.5], [0.0, 0.0, 0.28], true).sneak);
     }
 }

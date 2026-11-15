@@ -1,6 +1,6 @@
 id = "parkour"
 name = "Parkour"
-version = "0.1.0"
+version = "0.2.0"
 description = "Parkour cinemático: wall-run, mantle, vault, roll y más."
 authors = ["stwby"]
 api = "0.2"

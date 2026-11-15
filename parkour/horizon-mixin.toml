@@ -2,7 +2,7 @@
 # Compilar: tools/dev_build.sh (instancia parkour-dev).
 [mod]
 id = "parkour"
-version = "0.1.0"
+version = "0.2.0"
 
 # Commit de Horizon con el que está probado (Nightly 2026-11-08). Un .hnmod debe declararlo igual
 # en horizon-native.json. Sólo usamos hooks del catálogo + Host.

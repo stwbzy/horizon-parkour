@@ -91,7 +91,7 @@ impl Server {
             if config.fall_damage {
                 flags |= net::ALLOW_FALL;
             }
-            let welcome = Welcome { id, protocol: net::PROTOCOL, flags };
+            let welcome = Welcome { id, protocol: net::PROTOCOL, flags, uuid: event.player };
             // Sin respuesta si el canal falla: el cliente vuelve a preguntar.
             let _ = host.net_send_to_player(event.player, net::ID, &welcome.encode());
         } else if let Some(&byte) = event.data.first()

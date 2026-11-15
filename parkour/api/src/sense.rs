@@ -96,6 +96,8 @@ pub struct Obstacle {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Senses {
     pub ground: bool,
+    /// Un borde del que colgarse aunque no haya sitio para subir.
+    pub edge: Option<Edge>,
     pub wall_left: Option<Wall>,
     pub wall_right: Option<Wall>,
     pub wall_front: Option<Wall>,
@@ -117,6 +119,7 @@ pub fn sense(world: &impl World, feet: [f64; 3], yaw_deg: f32) -> Senses {
         wall_right: tall_wall(world, feet, rgt),
         wall_front: tall_wall(world, feet, fwd),
         ledge: ledge(world, feet, fwd),
+        edge: edge(world, feet, fwd),
         obstacle: obstacle(world, feet, fwd),
         headroom: headroom(world, feet),
         drop: drop_below(world, feet),
@@ -296,6 +299,47 @@ pub fn ledge(world: &impl World, feet: [f64; 3], dir: [f64; 2]) -> Option<Ledge>
 
 /// Un obstáculo bajo (más que un escalón, hasta `VAULT_MAX`) delante, con sitio por encima para
 /// pasar al menos agachado. Lo fino (vallas, un bloque) se pasa; lo hondo se sube.
+/// Lo alto que puede estar un borde del que colgarse, sobre los pies, y lo bajo.
+pub const EDGE_MAX: f64 = 2.3;
+pub const EDGE_MIN: f64 = 1.2;
+
+/// Un borde del que colgarse: la cara de arriba de una pared, al alcance de las manos.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Edge {
+    /// Altura del borde sobre los pies.
+    pub height: f64,
+    /// Y del borde en el mundo.
+    pub top: f64,
+    /// Distancia horizontal hasta la pared.
+    pub distance: f64,
+    pub normal: [f64; 2],
+}
+
+/// El borde de la pared que hay delante (en `dir`) con sitio para los dedos encima, aunque no
+/// quepa el cuerpo para subir: de él se cuelga y por él se mueve de lado.
+pub fn edge(world: &impl World, feet: [f64; 3], dir: [f64; 2]) -> Option<Edge> {
+    let (low, high) = (feet[1] + EDGE_MIN, feet[1] + EDGE_MAX);
+    let wall = sweep(world, feet, dir, WALL_REACH, feet[1] + STEP_HEIGHT, high)?;
+    let inside = wall.distance + HALF_WIDTH + 0.05;
+    let at = [feet[0] + dir[0] * inside, feet[2] + dir[1] * inside];
+    let column = [at[0] - 0.05, low, at[1] - 0.05, at[0] + 0.05, high, at[1] + 0.05];
+    let mut tops: Vec<f64> = boxes_near(world, column)
+        .iter()
+        .filter(|b| overlaps(&column, b))
+        .map(|b| b[4])
+        .filter(|top| *top > low && *top <= high)
+        .collect();
+    tops.sort_by(f64::total_cmp);
+    tops.dedup_by(|a, b| (*a - *b).abs() < EPS);
+    // Sitio para los dedos: un poco de aire sobre el borde, justo pasada la cara de la pared.
+    let fingers = |top: f64| {
+        let reach = [feet[0] + dir[0] * (inside + 0.1), feet[2] + dir[1] * (inside + 0.1)];
+        is_free(world, [reach[0] - 0.1, top + 0.01, reach[1] - 0.1, reach[0] + 0.1, top + 0.3, reach[1] + 0.1])
+    };
+    let top = tops.into_iter().find(|top| fingers(*top))?;
+    Some(Edge { height: top - feet[1], top, distance: wall.distance, normal: wall.normal })
+}
+
 pub fn obstacle(world: &impl World, feet: [f64; 3], dir: [f64; 2]) -> Option<Obstacle> {
     let wall = sweep(world, feet, dir, VAULT_REACH, feet[1] + STEP_HEIGHT, feet[1] + VAULT_MAX)?;
     let at = |s: f64| [feet[0] + dir[0] * s, feet[1], feet[2] + dir[1] * s];
@@ -551,6 +595,25 @@ mod tests {
             world = world.full(0, y, 1);
         }
         assert_eq!(sense(&world, FEET, SOUTH).ledge, None);
+    }
+
+    #[test]
+    fn an_edge_with_no_room_above_can_still_be_held() {
+        // Pared de 2 bloques al sur con un bloque justo encima, a un bloque del borde: no se sube,
+        // pero los dedos caben.
+        let world = Blocks::default().floor().pillar(0, 1, 2).full(0, 67, 1);
+        let s = sense(&world, FEET, SOUTH);
+        assert_eq!(s.ledge, None);
+        let edge = s.edge.expect("borde");
+        assert!(close(edge.top, 66.0) && close(edge.height, 2.0));
+        assert_eq!(edge.normal, [0.0, -1.0]);
+        // Sin sitio para los dedos (un bloque encima), no hay borde a esa altura, y el de arriba
+        // queda fuera de alcance.
+        let world = Blocks::default().floor().pillar(0, 1, 2).full(0, 66, 1);
+        assert_eq!(sense(&world, FEET, SOUTH).edge, None);
+        // Una pared baja (1 bloque) no es borde de colgarse.
+        let world = Blocks::default().floor().pillar(0, 1, 1);
+        assert_eq!(sense(&world, FEET, SOUTH).edge, None);
     }
 
     #[test]

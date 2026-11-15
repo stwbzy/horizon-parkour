@@ -7,15 +7,18 @@
 //! Multijugador: el cliente sólo hace parkour si el servidor tiene el mod con la misma versión
 //! y lo permite (`net::Welcome`); el servidor comprueba lo que dicen los clientes (`guard`).
 //!
-//! Hecho hasta la fase 7 (ver PLAN.md): seguimiento del jugador, sensores, HUD de depuración,
-//! ajustes, el aterrizaje (correr, agacharse o rodar al caer quita daño de caída), el mantle
-//! (agarrarse a una repisa en el aire y subir a pulso, o quedarse colgado), el vault (saltar
-//! corriendo un obstáculo bajo), el slide (agacharse corriendo para deslizarse) y el wall-run
-//! (correr por una pared lateral o subir por una de frente, y el wall jump), con sonido según el
-//! material, polvo del bloque y FOV de la velocidad.
+//! Hecho hasta la fase 8 (ver PLAN.md): seguimiento del jugador, sensores, HUD de depuración,
+//! ajustes, el aterrizaje (correr, agacharse o rodar al caer quita daño de caída) y la plancha,
+//! el mantle (agarrarse a una repisa en el aire y subir a pulso, o colgarse de un borde y moverse
+//! por él, con los brazos de la skin agarrados), el vault (normal y rápido), el slide, el wall-run
+//! (lateral y vertical), el wall jump y el tic-tac; el margen al saltar (coyote y salto guardado),
+//! la inercia de encadenar movimientos, sonido según el material, polvo y FOV de la velocidad.
 
+pub mod arms;
+pub mod assist;
 pub mod cinematic;
 pub mod config;
+pub mod flow;
 pub mod fx;
 pub mod guard;
 pub mod land;
@@ -33,8 +36,8 @@ mod server;
 use horizon_client::mod_api::{
     CameraPoseEvent, CameraShakeEvent, ComputeFovModifierEvent, Flow, Hooks, Host, HudEvent,
     LivingFallEvent, ModsEvent, MovementInputEvent, NativeMod, NetFromClientEvent,
-    NetFromServerEvent, PlayerLoggedInEvent, RenderHandPoseEvent, SettingsClickEvent,
-    SettingsEvent, Text, TickEvent,
+    NetFromServerEvent, PlayerLoggedInEvent, RenderHandEvent, RenderHandPoseEvent,
+    SettingsClickEvent, SettingsEvent, Text, TickEvent, WorldSubmitEvent,
 };
 
 /// Id del mod: namespace, carpeta de ajustes y canales de red.
@@ -135,6 +138,14 @@ impl Hooks for Parkour {
 
     fn render_hand_pose(&self, _host: &dyn Host, event: &mut RenderHandPoseEvent<'_>) {
         self.client.render_hand_pose(event);
+    }
+
+    fn render_hand(&self, _host: &dyn Host, event: &mut RenderHandEvent<'_>) -> Flow {
+        self.client.render_hand(event)
+    }
+
+    fn world_submit(&self, host: &dyn Host, event: &mut WorldSubmitEvent<'_>) {
+        self.client.world_submit(host, event);
     }
 
     fn tick(&self, host: &mut dyn Host, _event: &mut TickEvent) {

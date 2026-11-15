@@ -62,11 +62,12 @@ pub fn can_slide(ground: bool, speed_h: f64, input: Input, sneak_pressed: bool) 
 
 impl Slide {
     /// `vel` es el desplazamiento del último tick: marca la dirección y la velocidad de salida.
-    pub fn start(vel: [f64; 3]) -> Slide {
+    /// `bonus` sube el tope (la inercia de encadenar movimientos, 1 sin ella).
+    pub fn start(vel: [f64; 3], bonus: f64) -> Slide {
         let speed_h = vel[0].hypot(vel[2]).max(1e-9);
         Slide {
             dir: [vel[0] / speed_h, vel[2] / speed_h],
-            speed: (speed_h * BOOST).min(MAX_SPEED),
+            speed: (speed_h * BOOST * bonus).min(MAX_SPEED * bonus),
             ticks: 0,
             air: 0,
         }
@@ -150,7 +151,7 @@ mod tests {
 
     #[test]
     fn a_held_slide_covers_about_five_blocks() {
-        let mut slide = Slide::start([0.0, 0.0, 0.28]);
+        let mut slide = Slide::start([0.0, 0.0, 0.28], 1.0);
         assert_eq!(slide.dir, [0.0, 1.0]);
         let (z, end, ticks) = run(&mut slide, |_| SLIDING);
         assert_eq!(end, Some(End::Stopped));
@@ -159,7 +160,7 @@ mod tests {
 
     #[test]
     fn a_tap_still_slides_a_bit_and_releasing_ends_it() {
-        let mut slide = Slide::start([0.0, 0.0, 0.28]);
+        let mut slide = Slide::start([0.0, 0.0, 0.28], 1.0);
         let (z, end, ticks) = run(&mut slide, |t| Input { sneak: t == 0, ..SLIDING });
         assert_eq!(end, Some(End::Released));
         assert_eq!(ticks, MIN_TICKS - 1);
@@ -168,21 +169,21 @@ mod tests {
 
     #[test]
     fn jumping_ends_the_slide() {
-        let mut slide = Slide::start([0.0, 0.0, 0.28]);
+        let mut slide = Slide::start([0.0, 0.0, 0.28], 1.0);
         let (_, end, _) = run(&mut slide, |t| Input { jump: t == 4, ..SLIDING });
         assert_eq!(end, Some(End::Jump));
     }
 
     #[test]
     fn a_wall_stops_it() {
-        let mut slide = Slide::start([0.0, 0.0, 0.28]);
+        let mut slide = Slide::start([0.0, 0.0, 0.28], 1.0);
         let end = (0..10).find_map(|_| slide.tick([0.0; 3], true, SLIDING).end);
         assert_eq!(end, Some(End::Blocked));
     }
 
     #[test]
     fn a_step_down_does_not_end_it_but_a_drop_does() {
-        let mut slide = Slide::start([0.0, 0.0, 0.28]);
+        let mut slide = Slide::start([0.0, 0.0, 0.28], 1.0);
         let moving = [0.0, -0.1, 0.3];
         assert_eq!(slide.tick(moving, false, SLIDING).end, None);
         assert_eq!(slide.tick(moving, true, SLIDING).end, None);

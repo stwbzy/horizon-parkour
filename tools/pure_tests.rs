@@ -2,10 +2,16 @@
 //! Todo módulo que no use `horizon_client` va aquí.
 #![allow(dead_code)]
 
+#[path = "../parkour/api/src/arms.rs"]
+pub mod arms;
+#[path = "../parkour/api/src/assist.rs"]
+pub mod assist;
 #[path = "../parkour/api/src/cinematic.rs"]
 pub mod cinematic;
 #[path = "../parkour/api/src/config.rs"]
 pub mod config;
+#[path = "../parkour/api/src/flow.rs"]
+pub mod flow;
 #[path = "../parkour/api/src/fx.rs"]
 pub mod fx;
 #[path = "../parkour/api/src/guard.rs"]

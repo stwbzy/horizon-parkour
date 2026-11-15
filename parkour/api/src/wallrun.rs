@@ -28,9 +28,9 @@ const SIDE_RISE: f64 = 0.1;
 const SIDE_SINK: f64 = -0.12;
 const SIDE_MIN_SPEED: f64 = 0.26;
 const SIDE_MAX_SPEED: f64 = 0.34;
-/// La subida vertical: empieza como un salto y frena cada tick (unos 2.5 bloques).
-const UP_SPEED: f64 = 0.42;
-const UP_DECAY: f64 = 0.032;
+/// La subida vertical: arranca fuerte y frena cada tick (unos 3 bloques en medio segundo).
+const UP_SPEED: f64 = 0.6;
+const UP_DECAY: f64 = 0.055;
 /// Cuánto se acerca a la pared por tick para no despegarse.
 const HUG: f64 = 0.08;
 /// Ticks seguidos sin ver la pared antes de soltarse (una ventana, un hueco).
@@ -38,6 +38,18 @@ const LOST_TICKS: u32 = 2;
 /// Wall jump: hacia fuera de la pared y hacia arriba.
 const KICK_OUT: f64 = 0.32;
 const KICK_UP: f64 = 0.42;
+
+/// Tic-tac: cuánto hay que mirar hacia la pared (coseno del ángulo con su normal): ni de frente
+/// (eso es subir por ella) ni de lado (eso es correr por ella), en diagonal.
+pub const TIC_TAC_FACING: std::ops::RangeInclusive<f64> = 0.3..=0.82;
+/// Distancia máxima a la pared, velocidad mínima hacia ella y a lo largo de ella.
+const TIC_TAC_REACH: f64 = 0.45;
+const TIC_TAC_INTO: f64 = 0.02;
+const TIC_TAC_ALONG: f64 = 0.1;
+/// El impulso: hacia fuera, hacia arriba, y a lo largo de la pared al menos a esta velocidad.
+const TIC_TAC_OUT: f64 = 0.3;
+const TIC_TAC_UP: f64 = 0.45;
+const TIC_TAC_SPEED: f64 = 0.28;
 
 const GRAVITY: f64 = 0.08;
 const DRAG_Y: f64 = 0.98;
@@ -126,15 +138,43 @@ pub fn can_run_up(wall: &Wall, facing: [f64; 2], ran: bool, input: Input) -> boo
     -dot(facing, wall.normal) >= UP_FACING && ran && input.jump && input.forward > 0.1 && !input.sneak
 }
 
+/// Tic-tac: en el aire, cerca de una pared a la que se va en diagonal, pulsar saltar se impulsa
+/// en ella hacia un lado. `jump`: acaba de pulsar saltar.
+pub fn can_tic_tac(wall: &Wall, facing: [f64; 2], vel: [f64; 3], jump: bool, input: Input) -> bool {
+    let toward = -dot(facing, wall.normal);
+    let into = -dot([vel[0], vel[2]], wall.normal);
+    let t = along(wall.normal, vel);
+    jump
+        && wall.distance <= TIC_TAC_REACH
+        && TIC_TAC_FACING.contains(&toward)
+        && into >= TIC_TAC_INTO
+        && t[0].hypot(t[1]) >= TIC_TAC_ALONG
+        && !input.sneak
+}
+
+/// El empujón del tic-tac, con `last` el desplazamiento del último tick: sigue a lo largo de la
+/// pared (al menos a la velocidad de la carrera, más `bonus` de la inercia), hacia fuera y arriba.
+pub fn tic_tac(wall: &Wall, last: [f64; 3], bonus: f64) -> [f64; 3] {
+    let t = along(wall.normal, last);
+    let speed = t[0].hypot(t[1]).max(1e-9);
+    let keep = speed.max(TIC_TAC_SPEED) * bonus;
+    let h = [
+        t[0] / speed * keep + wall.normal[0] * TIC_TAC_OUT,
+        t[1] / speed * keep + wall.normal[1] * TIC_TAC_OUT,
+    ];
+    push([h[0], TIC_TAC_UP, h[1]], last)
+}
+
 impl WallRun {
-    pub fn side(wall: &Wall, vel: [f64; 3]) -> WallRun {
+    /// `bonus` sube el tope de velocidad (la inercia de encadenar movimientos, 1 sin ella).
+    pub fn side(wall: &Wall, vel: [f64; 3], bonus: f64) -> WallRun {
         let t = along(wall.normal, vel);
         let speed = t[0].hypot(t[1]).max(1e-9);
         WallRun {
             kind: Kind::Side,
             normal: wall.normal,
             tangent: [t[0] / speed, t[1] / speed],
-            speed: speed.clamp(SIDE_MIN_SPEED, SIDE_MAX_SPEED),
+            speed: speed.clamp(SIDE_MIN_SPEED, SIDE_MAX_SPEED * bonus),
             ticks: 0,
             lost: 0,
         }
@@ -297,7 +337,7 @@ mod tests {
 
     #[test]
     fn a_side_run_arcs_along_the_wall_and_tires() {
-        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28]);
+        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28], 1.0);
         let (path, end) = simulate(&mut run, 60, RUN, west_wall());
         assert_eq!(end, Some(End::Tired));
         let top = path.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
@@ -310,21 +350,21 @@ mod tests {
 
     #[test]
     fn letting_go_looking_away_or_losing_the_wall_ends_it() {
-        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28]);
+        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28], 1.0);
         assert_eq!(run.tick(Some(west_wall()), [0.0, 0.1, 0.28], false, SOUTH, IDLE, false).end, Some(End::Released));
-        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28]);
+        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28], 1.0);
         assert_eq!(
             run.tick(Some(west_wall()), [0.0, 0.1, 0.28], false, [1.0, 0.0], RUN, false).end,
             Some(End::LookedAway)
         );
-        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28]);
+        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28], 1.0);
         assert_eq!(run.tick(None, [0.0, 0.1, 0.28], false, SOUTH, RUN, false).end, None);
         assert_eq!(run.tick(None, [0.0, 0.1, 0.28], false, SOUTH, RUN, false).end, Some(End::Lost));
     }
 
     #[test]
     fn a_wall_jump_pushes_out_up_and_on() {
-        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28]);
+        let mut run = WallRun::side(&west_wall(), [0.0, 0.1, 0.28], 1.0);
         let last = [0.0, 0.0, 0.3];
         let step = run.tick(Some(west_wall()), last, false, SOUTH, RUN, true);
         assert_eq!(step.end, Some(End::Jump));
@@ -335,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn running_up_a_wall_climbs_about_two_and_a_half_blocks() {
+    fn running_up_a_wall_climbs_about_three_blocks_fast() {
         assert!(can_run_up(&south_wall(), SOUTH, true, Input { jump: true, ..RUN }));
         assert!(!can_run_up(&south_wall(), SOUTH, false, Input { jump: true, ..RUN }));
         assert!(!can_run_up(&south_wall(), [1.0, 0.0], true, Input { jump: true, ..RUN }));
@@ -343,7 +383,36 @@ mod tests {
         let (path, end) = simulate(&mut run, 40, RUN, south_wall());
         assert_eq!(end, Some(End::Tired));
         let top = path.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
-        assert!((72.2..73.0).contains(&top), "sube hasta {top}");
+        assert!((72.7..73.3).contains(&top), "sube hasta {top}");
+        assert!(path.len() <= 11, "tarda {} ticks", path.len());
+    }
+
+    #[test]
+    fn a_tic_tac_needs_a_diagonal_approach_and_a_jump() {
+        let wall = south_wall();
+        // Mirando y yendo al sudeste, hacia la pared.
+        let diag = [0.7071, 0.7071];
+        let vel = [0.2, 0.0, 0.2];
+        assert!(can_tic_tac(&wall, diag, vel, true, RUN));
+        assert!(!can_tic_tac(&wall, diag, vel, false, RUN));
+        // De frente es subir por ella; de lado, correr por ella.
+        assert!(!can_tic_tac(&wall, SOUTH, [0.0, 0.0, 0.28], true, RUN));
+        assert!(!can_tic_tac(&wall, [1.0, 0.0], [0.28, 0.0, 0.0], true, RUN));
+        // Alejándose de la pared, no.
+        assert!(!can_tic_tac(&wall, diag, [0.2, 0.0, -0.1], true, RUN));
+        assert!(!can_tic_tac(&Wall { distance: 0.8, ..wall }, diag, vel, true, RUN));
+    }
+
+    #[test]
+    fn a_tic_tac_bounces_along_and_away_from_the_wall() {
+        let wall = south_wall();
+        let last = [0.2, -0.1, 0.2];
+        let push = tic_tac(&wall, last, 1.0);
+        let coast = [last[0] * DRAG_AIR, (last[1] - GRAVITY) * DRAG_Y, last[2] * DRAG_AIR];
+        let next = [coast[0] + push[0], coast[1] + push[1], coast[2] + push[2]];
+        assert!((next[0] - TIC_TAC_SPEED).abs() < 1e-9, "a lo largo {next:?}");
+        assert!((next[2] + TIC_TAC_OUT).abs() < 1e-9, "fuera {next:?}");
+        assert!((next[1] - TIC_TAC_UP).abs() < 1e-9);
     }
 
     #[test]

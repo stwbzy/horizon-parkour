@@ -36,6 +36,11 @@ pub fn sound(block: &str, kind: &str) -> String {
     format!("minecraft:block.{}.{kind}", material(block))
 }
 
+/// El silbido del aire de un movimiento rápido (wall jump, tic-tac, vault, plancha).
+pub const WHOOSH: &str = "minecraft:entity.player.attack.sweep";
+/// El roce de la ropa.
+pub const CLOTH: &str = "minecraft:item.armor.equip_leather";
+
 /// Sin sonido ni polvo: aire y fluidos.
 pub fn solid(block: &str) -> bool {
     let name = block.rsplit(':').next().unwrap_or(block);
