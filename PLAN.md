@@ -1,6 +1,6 @@
 # Parkour — mod de parkour cinemático para Horizon (Minecraft 26.3 en Rust)
 
-Fecha: 2026-11-14 · Estado: fases 0 a 5 hechas (esqueleto, sensores, aterrizaje y roll, mantle y hang, vault y slide, wall-run y wall jump); siguiente: fase 6 (capa cinemática, sonido y partículas)
+Fecha: 2026-11-14 · Estado: fases 0 a 6 hechas (esqueleto, sensores, aterrizaje y roll, mantle y hang, vault y slide, wall-run y wall jump, capa cinemática); siguiente: fase 7 (multijugador, anticheat, empaquetado y release)
 Mod hermano de `~/Proyectos/horizon-armas` (Arsenal): misma instancia, mismas rutas, mismo flujo de build.
 
 ## 1. Rutas y base técnica (reutilizado de Arsenal)
@@ -238,6 +238,19 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
 - Hasta 4 paredes sin tocar suelo, y no la misma dos veces seguidas (misma normal): zigzag entre dos paredes sí.
 - Cámara: inclinación de 8° hacia fuera de la pared (`camera_shake`, límite 10°), FOV +5 %, balanceo de zancada
   y pisada cada 6 ticks. **El signo de la inclinación está sin comprobar en el juego.**
+
+### Notas de la fase 6
+- `fx.rs`: grupo de sonido de vanilla por id de bloque (`block.<grupo>.step/hit/fall`: madera, piedra, hierba,
+  arena, grava, lana, nieve, cristal, metal), FOV de la velocidad (+8 % máx. entre 0.3 y 0.55 b/t, o cayendo a más
+  de 1 b/t) y un xorshift para repartir partículas.
+- Polvo con la textura del bloque (`add_particle` + `ParticleType::Block`; el sprite sale de `block_face_sprite`
+  del estado por defecto, cara norte; los teñidos por bioma usan un verde fijo). En aterrizajes (anillo según la
+  fuerza), roll, slide (cada 2 ticks, hacia atrás), pisadas en la pared, wall jump, agarre del mantle y apoyo del
+  vault. Ajuste Partículas sí/no.
+- Manos: corriendo por una pared, la del lado de la pared se adelanta hacia ella. Se supone jugador diestro
+  (`Hand::Main` a la derecha).
+- Descartado en v1: hitstop/timewarp (los mods no controlan el tiempo de render), viento en bucle (no hay sonido
+  en bucle para mods de cliente), 3ª persona animada (decisión 3).
 
 ## 9. Riesgos y mitigaciones
 - **Anticheat/vanilla del servidor** corrige movimientos agresivos → velocidades conservadoras, impulsos cortos y configurables.

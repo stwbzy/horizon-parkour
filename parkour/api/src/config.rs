@@ -14,8 +14,12 @@ pub const DEBUG_HUD: Setting =
 pub const CINEMATIC: Setting =
     Setting { key: "cinematic", label: "Cinemática", values: &["100", "150", "0", "50"] };
 
+/// Polvo del bloque al aterrizar, deslizar, correr por paredes y apoyarse.
+pub const PARTICLES: Setting =
+    Setting { key: "particles", label: "Partículas", values: &["sí", "no"] };
+
 /// En el orden en que salen en la página.
-pub const ALL: [&Setting; 2] = [&DEBUG_HUD, &CINEMATIC];
+pub const ALL: [&Setting; 3] = [&CINEMATIC, &PARTICLES, &DEBUG_HUD];
 
 impl Setting {
     /// El valor guardado si es uno de los válidos; si no, el de fábrica.

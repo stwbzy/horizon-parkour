@@ -7,12 +7,14 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use horizon_client::mod_api::{
-    CameraPoseEvent, CameraShakeEvent, ComputeFovModifierEvent, Corner, Host, HudEvent,
-    MovementInputEvent, NetFromServerEvent, RenderHandPoseEvent,
+    CameraPoseEvent, CameraShakeEvent, ComputeFovModifierEvent, Corner, Direction, Hand, Host,
+    HudEvent, MovementInputEvent, NetFromServerEvent, ParticleOptions, ParticleType,
+    RenderHandPoseEvent,
 };
 
 use crate::cinematic::{self, Effect, Pose};
 use crate::config;
+use crate::fx::{self, Rng};
 use crate::land::{self, Landing};
 use crate::mantle::{self, End, Mantle, Phase};
 use crate::net;
@@ -51,6 +53,13 @@ const KEEP_SPRINT: f32 = 0.01;
 const RAN_TICKS: u32 = 6;
 /// Ticks por zancada corriendo por una pared (sonido de pisada y balanceo).
 const STRIDE_TICKS: u32 = 6;
+/// La mano del lado de la pared se adelanta y sube hacia ella, en bloques de la vista.
+const WALL_HAND_UP: f32 = 0.12;
+const WALL_HAND_FORWARD: f32 = 0.12;
+/// Tinte del polvo de bloques teñidos por el bioma (hierba, hojas): un verde medio.
+const GRASS_TINT: u32 = 0x7CBD_6B;
+/// Cuánto se acerca el FOV de la velocidad a su valor en cada tick.
+const FOV_EASE: f32 = 0.2;
 
 #[derive(Default)]
 pub struct Client {
@@ -107,6 +116,11 @@ struct Inner {
     wall_side: [f32; 2],
     wall_up: [f32; 2],
     stride: [f32; 2],
+    /// El ajuste Partículas.
+    particles: bool,
+    rng: Rng,
+    /// El FOV de la velocidad, suavizado.
+    fov_speed: f32,
 }
 
 /// El mundo de la ventana para los sensores. Guarda las cajas ya pedidas: en un tick los
@@ -161,12 +175,17 @@ impl Client {
         let stored = host.setting(crate::NAMESPACE, config::CINEMATIC.key);
         inner.intensity =
             config::CINEMATIC.value(stored.as_deref()).parse::<f32>().unwrap_or(100.0) / 100.0;
+        let stored = host.setting(crate::NAMESPACE, config::PARTICLES.key);
+        inner.particles = config::PARTICLES.value(stored.as_deref()) == "sí";
+        let target = fx::speed_fov(inner.tracker.speed_h(), inner.tracker.vel[1], inner.intensity);
+        let fov = if inner.fov_speed > 0.0 { inner.fov_speed } else { 1.0 };
+        inner.fov_speed = fov + (target - fov) * FOV_EASE;
 
         inner.ask_own_id(host);
         inner.announce(host, feet);
         let mantling = inner.mantle(host, feet, player.yaw);
         let vaulting = inner.vault(host, feet);
-        inner.slide(host, low_ceiling);
+        inner.slide(host, feet, low_ceiling);
         let wallrunning = inner.wallrun(host, feet, run_wall);
         inner.jump_queued = false;
         if !mantling && !vaulting && !wallrunning {
@@ -309,6 +328,11 @@ impl Client {
         if let Some(pose) = self.pose(1.0) {
             event.modifier *= pose.fov;
         }
+        if let Ok(inner) = self.inner.lock()
+            && inner.fov_speed > 0.0
+        {
+            event.modifier *= inner.fov_speed;
+        }
     }
 
     pub fn render_hand_pose(&self, event: &mut RenderHandPoseEvent<'_>) {
@@ -318,10 +342,18 @@ impl Client {
         }
         let Ok(inner) = self.inner.lock() else { return };
         if inner.intensity > 0.0 {
+            let t = event.partial.clamp(0.0, 1.0);
             let [before, now] = inner.hands;
-            let raised = before + (now - before) * event.partial.clamp(0.0, 1.0);
+            let raised = before + (now - before) * t;
             event.y += HANDS_UP * raised;
             event.z -= HANDS_FORWARD * raised;
+            // Corriendo por una pared, la mano de ese lado va hacia ella (la principal es la
+            // derecha: se supone jugador diestro).
+            let [before, now] = inner.wall_side;
+            let side = before + (now - before) * t;
+            let reach = if matches!(event.hand, Hand::Main) { side.max(0.0) } else { (-side).max(0.0) };
+            event.y += WALL_HAND_UP * reach;
+            event.z -= WALL_HAND_FORWARD * reach;
         }
     }
 
@@ -401,7 +433,72 @@ impl Client {
     }
 }
 
+/// El bloque bajo unos pies.
+fn below(feet: [f64; 3]) -> [i32; 3] {
+    [feet[0].floor() as i32, (feet[1] - 0.2).floor() as i32, feet[2].floor() as i32]
+}
+
+/// El bloque de la pared que toca un jugador con los pies en `feet`, hacia `toward`.
+fn wall_block(feet: [f64; 3], toward: [f64; 2]) -> [i32; 3] {
+    let reach = sense::HALF_WIDTH + 0.2;
+    [
+        (feet[0] + toward[0] * reach).floor() as i32,
+        (feet[1] + 1.0).floor() as i32,
+        (feet[2] + toward[1] * reach).floor() as i32,
+    ]
+}
+
 impl Inner {
+    /// El sonido `kind` (`step`, `hit`, `fall`) del material del bloque `block`; nada si es aire.
+    fn material_sound(
+        &self,
+        host: &mut dyn Host,
+        block: [i32; 3],
+        kind: &str,
+        at: [f64; 3],
+        volume: f32,
+        pitch: f32,
+    ) {
+        let name = host.block(block);
+        if fx::solid(&name) {
+            host.play_local_sound(&fx::sound(&name, kind), at, volume, pitch, 0);
+        }
+    }
+
+    /// `count` motas de polvo del bloque `block` alrededor de `at` (repartidas en `spread`), con
+    /// velocidad `vel` más un poco de azar.
+    fn dust(
+        &mut self,
+        host: &mut dyn Host,
+        block: [i32; 3],
+        at: [f64; 3],
+        spread: [f64; 3],
+        vel: [f64; 3],
+        count: u32,
+    ) {
+        if !self.particles || count == 0 {
+            return;
+        }
+        let name = host.block(block);
+        if !fx::solid(&name) {
+            return;
+        }
+        let Some(state) = host.default_state(&name) else { return };
+        let Some((sprite, tint)) = host.block_face_sprite(state, Direction::North) else { return };
+        let tint = if tint >= 0 { GRASS_TINT } else { 0x00FF_FFFF };
+        let options = ParticleOptions::block(ParticleType::Block, sprite, tint);
+        for _ in 0..count {
+            let r = &mut self.rng;
+            let pos = [
+                at[0] + spread[0] * r.signed(),
+                at[1] + spread[1] * r.signed().abs(),
+                at[2] + spread[2] * r.signed(),
+            ];
+            let v = [vel[0] + 0.05 * r.signed(), vel[1] + 0.05 * r.signed().abs(), vel[2] + 0.05 * r.signed()];
+            host.add_particle(&options, pos, v);
+        }
+    }
+
     /// Pregunta al servidor por el id propio hasta que conteste. Falla sin más en servidores sin
     /// el mod: allí no hay nada que hacer con el id.
     fn ask_own_id(&mut self, host: &mut dyn Host) {
@@ -468,11 +565,14 @@ impl Inner {
                 host.play_local_sound("minecraft:item.armor.equip_leather", feet, 0.8, 1.2, 0);
             }
             Some(Move::WallRunUp) => {
-                host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 0.9, 0);
+                let wall = wall_block(feet, self.facing);
+                self.material_sound(host, wall, "step", feet, 1.0, 0.9);
+                self.dust(host, below(feet), feet, [0.3, 0.05, 0.3], [0.0, 0.05, 0.0], 4);
             }
             Some(Move::Slide) => {
-                host.play_local_sound("minecraft:block.gravel.step", feet, 1.0, 0.7, 0);
+                self.material_sound(host, below(feet), "step", feet, 1.0, 0.7);
                 host.play_local_sound("minecraft:item.armor.equip_leather", feet, 0.6, 0.8, 0);
+                self.dust(host, below(feet), feet, [0.3, 0.05, 0.3], [0.0, 0.08, 0.0], 5);
             }
             _ => {}
         }
@@ -483,7 +583,11 @@ impl Inner {
         let Some(mut v) = self.vault else { return false };
         let step = v.tick(feet, self.tracker.vel, self.tracker.on_ground());
         if step.over_started {
-            host.play_local_sound("minecraft:block.stone.step", feet, 0.9, 1.1, 0);
+            // Las manos se apoyan en el obstáculo, que ahora queda bajo los pies.
+            let block = below(feet);
+            self.material_sound(host, block, "hit", feet, 0.9, 1.1);
+            let at = [feet[0], feet[1] - 0.05, feet[2]];
+            self.dust(host, block, at, [0.25, 0.05, 0.25], [0.0, 0.04, 0.0], 3);
         }
         if step.end.is_some() {
             self.vault = None;
@@ -498,7 +602,7 @@ impl Inner {
     }
 
     /// Un tick del slide en curso. `low_ceiling`: hay techo bajo encima o delante.
-    fn slide(&mut self, host: &mut dyn Host, low_ceiling: bool) {
+    fn slide(&mut self, host: &mut dyn Host, feet: [f64; 3], low_ceiling: bool) {
         self.slide_cool = self.slide_cool.saturating_sub(1);
         let Some(mut s) = self.slide else { return };
         let step = s.tick(self.tracker.vel, self.tracker.on_ground(), self.tracker.input);
@@ -508,6 +612,14 @@ impl Inner {
         }
         host.push_player(step.push.map(|v| v as f32));
         self.slide = Some(s);
+        // Polvo que levantan los pies, hacia atrás, y el roce cada poco.
+        let back = [-s.dir[0] * 0.1, 0.06, -s.dir[1] * 0.1];
+        if s.ticks() % 2 == 0 {
+            self.dust(host, below(feet), feet, [0.25, 0.05, 0.25], back, 2);
+        }
+        if s.ticks() % 4 == 0 {
+            self.material_sound(host, below(feet), "step", feet, 0.4, 0.6);
+        }
         self.slide_sneak = low_ceiling;
         self.tracker.hold(Move::Slide);
     }
@@ -552,7 +664,8 @@ impl Inner {
             self.last_wall = Some(wall.normal);
             self.wall_grace = None;
             self.tracker.hold(Move::WallRunSide);
-            host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 1.0, 0);
+            let toward = [-wall.normal[0], -wall.normal[1]];
+            self.material_sound(host, wall_block(feet, toward), "step", feet, 1.0, 1.0);
             return true;
         };
         let step = run.tick(wall, last, self.tracker.on_ground(), self.facing, input, jump);
@@ -573,7 +686,14 @@ impl Inner {
                 self.wallrun = Some(run);
                 self.tracker.hold(if run.kind == Kind::Side { Move::WallRunSide } else { Move::WallRunUp });
                 if run.ticks % STRIDE_TICKS == 0 {
-                    host.play_local_sound("minecraft:block.stone.step", feet, 0.5, 1.1, 0);
+                    // Una pisada en la pared: su sonido y algo de polvo donde apoya el pie.
+                    let toward = run.toward();
+                    let block = wall_block(feet, toward);
+                    self.material_sound(host, block, "step", feet, 0.5, 1.1);
+                    let reach = sense::HALF_WIDTH + 0.05;
+                    let at = [feet[0] + toward[0] * reach, feet[1] + 0.6, feet[2] + toward[1] * reach];
+                    let out = [-toward[0] * 0.08, 0.02, -toward[1] * 0.08];
+                    self.dust(host, block, at, [0.15, 0.3, 0.15], out, 2);
                 }
             }
             Some(wallrun::End::Jump) => {
@@ -595,8 +715,14 @@ impl Inner {
         host.push_player(run.kick(self.tracker.vel).map(|v| v as f32));
         self.wall_grace = None;
         self.effect = Some((Effect::WallJump, Instant::now()));
-        host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 0.8, 0);
+        let toward = run.toward();
+        let block = wall_block(feet, toward);
+        self.material_sound(host, block, "hit", feet, 1.0, 0.8);
         host.play_local_sound("minecraft:item.armor.equip_leather", feet, 0.7, 1.3, 0);
+        let reach = sense::HALF_WIDTH + 0.05;
+        let at = [feet[0] + toward[0] * reach, feet[1] + 0.4, feet[2] + toward[1] * reach];
+        let out = [-toward[0] * 0.12, 0.05, -toward[1] * 0.12];
+        self.dust(host, block, at, [0.2, 0.4, 0.2], out, 6);
     }
 
     /// Se agarra a `ledge` y empieza el mantle.
@@ -604,7 +730,16 @@ impl Inner {
         self.mantle = Some(Mantle::grab(ledge));
         self.tracker.hold(Move::Mantle);
         self.effect = Some((Effect::Grab, Instant::now()));
-        host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 0.7, 0);
+        // El borde agarrado: el bloque bajo donde quedarían los pies arriba.
+        let edge = [ledge.landing[0], ledge.top - 0.5, ledge.landing[2]];
+        let block = edge.map(|v| v.floor() as i32);
+        self.material_sound(host, block, "hit", feet, 1.0, 0.7);
+        let at = [
+            ledge.landing[0] + ledge.normal[0] * 0.5,
+            ledge.top + 0.02,
+            ledge.landing[2] + ledge.normal[1] * 0.5,
+        ];
+        self.dust(host, block, at, [0.25, 0.02, 0.25], [0.0, 0.02, 0.0], 4);
         self.hold_fall(host, true);
     }
 
@@ -709,11 +844,19 @@ impl Inner {
                 host.push_player([(dir[0] * ROLL_PUSH) as f32, 0.0, (dir[1] * ROLL_PUSH) as f32]);
                 host.play_local_sound("minecraft:item.armor.equip_leather", feet, 1.0, 0.8, 0);
                 host.play_local_sound("minecraft:block.wool.fall", feet, 1.0, 0.9, 5);
+                let push = [dir[0] * 0.12, 0.05, dir[1] * 0.12];
+                self.dust(host, below(feet), feet, [0.4, 0.05, 0.4], push, 8);
                 Effect::Roll
             }
             Landing::Crouch => Effect::SoftLanding { strength },
             Landing::Run | Landing::Plain | Landing::Grab => Effect::HardLanding { strength },
         };
+        if landing != Landing::Roll {
+            // Un anillo de polvo, más cuanto más fuerte el golpe.
+            let count = (4.0 + 12.0 * strength) as u32;
+            self.dust(host, below(feet), feet, [0.45, 0.05, 0.45], [0.0, 0.06, 0.0], count);
+            self.material_sound(host, below(feet), "fall", feet, 0.6 + 0.4 * strength, 0.9);
+        }
         self.effect = Some((effect, Instant::now()));
     }
 }

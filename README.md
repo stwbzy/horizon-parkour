@@ -20,6 +20,10 @@ parkour al estilo Mirror's Edge, con cámara y manos animadas en primera persona
 - **Wall jump**: salta durante un wall-run (o justo al soltarte) y te impulsas hacia fuera; puedes encadenar
   hasta 4 paredes distintas sin tocar el suelo.
 
+Cada movimiento tiene su animación de cámara y manos en primera persona, suena según el material del bloque que
+tocas (madera, piedra, arena…) y levanta polvo de ese bloque. Ir más rápido que esprintando abre un poco el FOV.
+En Options > Mods > Parkour: intensidad de la cinemática (0–150 %), partículas sí/no y HUD de depuración.
+
 El diseño completo y las fases están en [PLAN.md](PLAN.md).
 
 Sin teclas propias: todo es contextual con salto, sprint y agacharse.
@@ -31,8 +35,6 @@ Sin teclas propias: todo es contextual con salto, sprint y agacharse.
 | `tools/dev_build.sh` | Empaqueta e instala el mod en la instancia `parkour-dev` y compila el juego con el launcher |
 | `tools/test.sh` | Tests de la lógica pura (estados, sensores, aterrizaje, mantle, vault, slide, wall-run, curvas de cámara) |
 | `python3 tools/package.py` | Crea `dist/parkour.hnmod` |
-
-El HUD de depuración se activa en Options > Mods > Parkour.
 
 ## Licencia
 
