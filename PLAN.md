@@ -1,6 +1,6 @@
 # Parkour — mod de parkour cinemático para Horizon (Minecraft 26.3 en Rust)
 
-Fecha: 2026-11-14 · Estado: fases 0 a 4 hechas (esqueleto, sensores, aterrizaje y roll, mantle y hang, vault y slide); siguiente: fase 5 (wall-run y wall jump)
+Fecha: 2026-11-14 · Estado: fases 0 a 5 hechas (esqueleto, sensores, aterrizaje y roll, mantle y hang, vault y slide, wall-run y wall jump); siguiente: fase 6 (capa cinemática, sonido y partículas)
 Mod hermano de `~/Proyectos/horizon-armas` (Arsenal): misma instancia, mismas rutas, mismo flujo de build.
 
 ## 1. Rutas y base técnica (reutilizado de Arsenal)
@@ -222,6 +222,22 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
 - Mientras el mod mueve al jugador en vault y slide, el avance se deja en 0.01: cuenta como "adelante" y el juego
   no le quita el sprint (vanilla lo quita sin avance).
 - El rozamiento del suelo se supone normal (0.6): en hielo el slide va más lejos.
+
+### Notas de la fase 5
+- `wallrun.rs`, controlador de velocidad en el aire como los demás.
+- **Lateral**: empieza solo, sin tecla: en el aire (caída libre), pared alta a ≤ 0.35 a un lado, ≥ 0.18 b/t a lo
+  largo de ella, mirando hacia donde va (no hacia fuera), avanzar pulsado y ≥ 1 bloque de vacío debajo. Corre a
+  la velocidad de entrada (0.26–0.34) hasta 28 ticks (~8 bloques) en arco: sube 0.1 b/t al principio y baja
+  0.12 al final. Se acaba al soltar avanzar, mirar hacia fuera (> 45°), perder la pared 2 ticks, chocar,
+  agacharse o tocar suelo.
+- **Vertical**: saltar mirando de frente (≤ 37°) a una pared alta a ≤ 0.7, habiendo corrido en los últimos 6
+  ticks (al chocar se frena). Sube 0.42 b/t frenando 0.032 por tick: ~2.5 bloques. Si el borde queda al alcance
+  del mantle, se agarra directamente.
+- **Wall jump**: pulsar saltar durante el wall-run o hasta 5 ticks después de soltarse. Lateral: 0.32 hacia fuera
+  + 0.42 arriba + sigue hacia delante; vertical: 0.32 hacia atrás + 0.42 arriba (sin giro de cámara).
+- Hasta 4 paredes sin tocar suelo, y no la misma dos veces seguidas (misma normal): zigzag entre dos paredes sí.
+- Cámara: inclinación de 8° hacia fuera de la pared (`camera_shake`, límite 10°), FOV +5 %, balanceo de zancada
+  y pisada cada 6 ticks. **El signo de la inclinación está sin comprobar en el juego.**
 
 ## 9. Riesgos y mitigaciones
 - **Anticheat/vanilla del servidor** corrige movimientos agresivos → velocidades conservadoras, impulsos cortos y configurables.

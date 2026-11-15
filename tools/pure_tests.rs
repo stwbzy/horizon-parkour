@@ -20,3 +20,5 @@ pub mod slide;
 pub mod state;
 #[path = "../parkour/api/src/vault.rs"]
 pub mod vault;
+#[path = "../parkour/api/src/wallrun.rs"]
+pub mod wallrun;

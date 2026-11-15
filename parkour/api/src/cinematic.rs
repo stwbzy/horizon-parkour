@@ -38,6 +38,8 @@ pub enum Effect {
     MantleOver,
     /// Apoyar las manos y saltar un obstáculo.
     Vault,
+    /// Impulsarse desde una pared.
+    WallJump,
 }
 
 /// Lo que dura la voltereta, en segundos y en ticks.
@@ -67,6 +69,7 @@ impl Effect {
             Effect::Grab => 0.3,
             Effect::MantleOver => 0.45,
             Effect::Vault => 0.5,
+            Effect::WallJump => 0.4,
         }
     }
 
@@ -143,6 +146,19 @@ impl Effect {
                 hand_drop: 0.5 * arc,
                 hand_pitch: 25.0 * arc,
             },
+            Effect::WallJump => {
+                // Sale despedido: pico de FOV y la cabeza atrás un momento.
+                let s = kick(u, 0.2);
+                Pose {
+                    spin: 0.0,
+                    pitch: -4.0 * s * k,
+                    roll: 0.0,
+                    drop: 0.0,
+                    fov: 1.0 + 0.07 * s * k,
+                    hand_drop: 0.2 * s,
+                    hand_pitch: 15.0 * s,
+                }
+            }
             Effect::Vault => {
                 // Mira al obstáculo al apoyarse, se ladea al pasar y sale con un pico de FOV.
                 let lean = kick(u, 0.35);
@@ -157,6 +173,32 @@ impl Effect {
                 }
             }
         })
+    }
+}
+
+/// Inclinación máxima de la cámara corriendo por una pared lateral, en grados. El motor no deja
+/// pasar de 10 por `camera_shake`.
+pub const WALL_TILT: f32 = 8.0;
+
+/// La pose del wall-run. `side` va de -1 (pared a la izquierda) a 1 (a la derecha): la cámara se
+/// inclina hacia fuera de la pared. `up` (0 a 1) es la subida por una pared de frente: mira un poco
+/// hacia arriba. `step` (0 a 1) es la fase de la zancada, para el balanceo de las pisadas.
+pub fn wallrun_pose(side: f32, up: f32, step: f32, intensity: f32) -> Pose {
+    let k = intensity.clamp(0.0, 1.5);
+    let (side, up) = (side.clamp(-1.0, 1.0), up.clamp(0.0, 1.0));
+    if k == 0.0 || (side == 0.0 && up == 0.0) {
+        return Pose::NONE;
+    }
+    let bob = (2.0 * PI * step).sin();
+    let on_wall = side.abs().max(up);
+    Pose {
+        spin: 0.0,
+        pitch: (-3.0 * up + 0.8 * bob * on_wall) * k,
+        roll: -WALL_TILT * side * k.min(1.25),
+        drop: 0.0,
+        fov: 1.0 + (0.05 * side.abs() + 0.03 * up) * k,
+        hand_drop: -0.15 * up + 0.04 * bob * on_wall,
+        hand_pitch: -20.0 * up,
     }
 }
 
@@ -198,13 +240,14 @@ impl Pose {
 mod tests {
     use super::*;
 
-    const ALL: [Effect; 6] = [
+    const ALL: [Effect; 7] = [
         Effect::Roll,
         Effect::SoftLanding { strength: 1.0 },
         Effect::HardLanding { strength: 1.0 },
         Effect::Grab,
         Effect::MantleOver,
         Effect::Vault,
+        Effect::WallJump,
     ];
 
     #[test]
@@ -258,6 +301,18 @@ mod tests {
         // Con un efecto encima, los giros siguen dentro del límite.
         let both = full.and(Effect::Vault.pose(0.2, 1.5).expect("dura"));
         assert!(both.roll.abs() <= 10.0 && both.pitch.abs() <= 10.0, "{both:?}");
+    }
+
+    #[test]
+    fn the_wall_run_tilts_away_from_the_wall_within_the_limit() {
+        assert_eq!(wallrun_pose(0.0, 0.0, 0.3, 1.0), Pose::NONE);
+        let right = wallrun_pose(1.0, 0.0, 0.0, 1.5);
+        let left = wallrun_pose(-1.0, 0.0, 0.0, 1.5);
+        assert!(right.roll < 0.0 && left.roll > 0.0);
+        for step in 0..10 {
+            let p = wallrun_pose(1.0, 1.0, step as f32 / 10.0, 1.5);
+            assert!(p.roll.abs() <= 10.0 && p.pitch.abs() <= 10.0, "{p:?}");
+        }
     }
 
     #[test]

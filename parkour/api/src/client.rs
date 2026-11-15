@@ -20,6 +20,7 @@ use crate::sense::{self, Aabb, Senses, Wall};
 use crate::slide::{self, Slide};
 use crate::state::{Input, Move, RUN_SPEED, Tracker};
 use crate::vault::{self, Vault};
+use crate::wallrun::{self, Kind, WallRun};
 
 const LINE_H: f32 = 10.0;
 const PAD: f32 = 3.0;
@@ -46,6 +47,10 @@ const SLIDE_EASE: f32 = 0.35;
 /// Avance que se deja pedir mientras el mod mueve al jugador: casi nada, pero cuenta como
 /// "adelante" y así el juego no le quita el sprint.
 const KEEP_SPRINT: f32 = 0.01;
+/// Ticks desde que corría con los que aún vale para subir por una pared (al chocar se frena).
+const RAN_TICKS: u32 = 6;
+/// Ticks por zancada corriendo por una pared (sonido de pisada y balanceo).
+const STRIDE_TICKS: u32 = 6;
 
 #[derive(Default)]
 pub struct Client {
@@ -88,6 +93,20 @@ struct Inner {
     sliding: [f32; 2],
     /// Movimiento empezado en `movement_input`, para darle sonido y efecto en el tick.
     started: Option<Move>,
+    /// El wall-run en curso, y el último tras soltarse mientras aún vale saltar de él.
+    wallrun: Option<WallRun>,
+    wall_grace: Option<(WallRun, u32)>,
+    /// Paredes usadas desde el último suelo, y la última (no se repite la misma seguida).
+    walls_used: u8,
+    last_wall: Option<[f64; 2]>,
+    /// Se pulsó saltar desde el último tick.
+    jump_queued: bool,
+    /// Ticks desde la última vez que corría.
+    ran_ago: u32,
+    /// Cámara del wall-run: lado (-1 a 1) y subida (0 a 1), el tick anterior y éste; y la zancada.
+    wall_side: [f32; 2],
+    wall_up: [f32; 2],
+    stride: [f32; 2],
 }
 
 /// El mundo de la ventana para los sensores. Guarda las cajas ya pedidas: en un tick los
@@ -116,10 +135,28 @@ impl Client {
         inner.senses = sense::sense(&world, feet, player.yaw);
         inner.facing = sense::forward(player.yaw);
         let low_ceiling = inner.slide.is_some_and(|s| sense::low_ceiling(&world, feet, s.dir));
+        let run_wall = inner.wallrun.and_then(|w| match w.kind {
+            Kind::Side => sense::tall_wall(&world, feet, w.toward()),
+            // Subiendo, vale cualquier pared delante del cuerpo, aunque arriba se acabe.
+            Kind::Up => sense::sweep(
+                &world,
+                feet,
+                w.toward(),
+                sense::WALL_REACH,
+                feet[1] + sense::STEP_HEIGHT,
+                feet[1] + sense::STAND_HEIGHT,
+            ),
+        });
         drop(world);
         let ground = inner.senses.ground;
         let fall_speed = inner.tracker.vel[1];
         inner.tracker.tick(feet, ground);
+        if ground {
+            inner.walls_used = 0;
+            inner.last_wall = None;
+            inner.wall_grace = None;
+        }
+        inner.ran_ago = if inner.running() { 0 } else { inner.ran_ago.saturating_add(1) };
 
         let stored = host.setting(crate::NAMESPACE, config::CINEMATIC.key);
         inner.intensity =
@@ -130,7 +167,9 @@ impl Client {
         let mantling = inner.mantle(host, feet, player.yaw);
         let vaulting = inner.vault(host, feet);
         inner.slide(host, low_ceiling);
-        if !mantling && !vaulting {
+        let wallrunning = inner.wallrun(host, feet, run_wall);
+        inner.jump_queued = false;
+        if !mantling && !vaulting && !wallrunning {
             inner.warn_landing(host);
             if let Some(fall) = inner.tracker.landed
                 && fall >= land::MIN_FALL
@@ -145,6 +184,22 @@ impl Client {
         let low = inner.slide.is_some();
         let now = inner.sliding[1];
         inner.sliding = [now, now + (f32::from(low) - now) * SLIDE_EASE];
+        let (side, up) = match inner.wallrun {
+            Some(w) if w.kind == Kind::Side => {
+                let r = sense::right(player.yaw);
+                (-(w.normal[0] * r[0] + w.normal[1] * r[1]) as f32, 0.0)
+            }
+            Some(_) => (0.0, 1.0),
+            None => (0.0, 0.0),
+        };
+        let now = inner.wall_side[1];
+        inner.wall_side = [now, now + (side - now) * SLIDE_EASE];
+        let now = inner.wall_up[1];
+        inner.wall_up = [now, now + (up - now) * SLIDE_EASE];
+        let now = inner.stride[1];
+        let next = if inner.wallrun.is_some() { now + 1.0 / STRIDE_TICKS as f32 } else { now };
+        // Sin saltos al dar la vuelta: se interpola entre `now` y `next` y luego se reduce.
+        inner.stride = if next >= 1.0 { [now - 1.0, next - 1.0] } else { [now, next] };
     }
 
     /// Aquí empiezan el vault (saltar corriendo hacia un obstáculo bajo) y el slide (agacharse
@@ -158,6 +213,9 @@ impl Client {
         let input =
             Input { forward: event.forward, strafe: event.strafe, jump: event.jump, sneak: event.sneak };
         let sneak_pressed = input.sneak && !inner.tracker.input.sneak;
+        if input.jump && !inner.tracker.input.jump {
+            inner.jump_queued = true;
+        }
         inner.tracker.input = input;
         inner.try_start(input, sneak_pressed);
         if inner.slide.is_some() && input.jump {
@@ -166,7 +224,12 @@ impl Client {
             event.sneak = false;
             return;
         }
-        if inner.vault.is_some() {
+        if inner.wallrun.is_some() {
+            event.forward = KEEP_SPRINT;
+            event.strafe = 0.0;
+            event.jump = false;
+            event.sneak = false;
+        } else if inner.vault.is_some() {
             event.forward = KEEP_SPRINT;
             event.strafe = 0.0;
             event.jump = false;
@@ -219,10 +282,11 @@ impl Client {
         let [before, now] = inner.sliding;
         let amount = before + (now - before) * partial.clamp(0.0, 1.0);
         let slide = (amount > 0.001).then(|| cinematic::slide_pose(amount, inner.intensity));
-        match (effect, slide) {
-            (Some(a), Some(b)) => Some(a.and(b)),
-            (a, b) => a.or(b),
-        }
+        let lerp = |[a, b]: [f32; 2]| a + (b - a) * partial.clamp(0.0, 1.0);
+        let (side, up) = (lerp(inner.wall_side), lerp(inner.wall_up));
+        let wall = (side.abs() > 0.001 || up > 0.001)
+            .then(|| cinematic::wallrun_pose(side, up, lerp(inner.stride), inner.intensity));
+        [effect, slide, wall].into_iter().flatten().reduce(Pose::and)
     }
 
     /// La voltereta y la bajada de cámara: giros grandes, que `camera_shake` no admite.
@@ -358,6 +422,7 @@ impl Inner {
         let busy = self.mantle.is_some()
             || self.vault.is_some()
             || self.slide.is_some()
+            || self.wallrun.is_some()
             || self.tracker.current == Move::Roll;
         let Some(feet) = self.tracker.pos.filter(|_| !busy) else { return };
         let t = &self.tracker;
@@ -371,6 +436,20 @@ impl Inner {
             self.vault_sneak = ob.crouch;
             self.tracker.hold(Move::Vault);
             self.started = Some(Move::Vault);
+            return;
+        }
+        if launch
+            && self.walls_used < wallrun::MAX_WALLS
+            && let Some(wall) = self.senses.wall_front
+            && self.last_wall != Some(wall.normal)
+            && wallrun::can_run_up(&wall, self.facing, self.ran_ago <= RAN_TICKS, input)
+        {
+            self.wallrun = Some(WallRun::up(&wall));
+            self.walls_used += 1;
+            self.last_wall = Some(wall.normal);
+            self.wall_grace = None;
+            self.tracker.hold(Move::WallRunUp);
+            self.started = Some(Move::WallRunUp);
             return;
         }
         if self.slide_cool == 0 && slide::can_slide(t.on_ground(), t.speed_h(), input, sneak_pressed) {
@@ -387,6 +466,9 @@ impl Inner {
             Some(Move::Vault) => {
                 self.effect = Some((Effect::Vault, Instant::now()));
                 host.play_local_sound("minecraft:item.armor.equip_leather", feet, 0.8, 1.2, 0);
+            }
+            Some(Move::WallRunUp) => {
+                host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 0.9, 0);
             }
             Some(Move::Slide) => {
                 host.play_local_sound("minecraft:block.gravel.step", feet, 1.0, 0.7, 0);
@@ -437,6 +519,95 @@ impl Inner {
         self.tracker.stop();
     }
 
+    /// El wall-run: empezar a correr por una pared lateral (sólo con estar en el aire junto a ella
+    /// corriendo), un tick del que esté en curso, o el wall jump. `wall` es la pared del wall-run
+    /// en curso vista este tick. Devuelve si el wall-run manda este tick.
+    fn wallrun(&mut self, host: &mut dyn Host, feet: [f64; 3], wall: Option<sense::Wall>) -> bool {
+        let jump = self.jump_queued;
+        let input = self.tracker.input;
+        let last = self.tracker.vel;
+        let Some(mut run) = self.wallrun else {
+            // Recién soltado: el salto aún vale.
+            if let Some((run, left)) = self.wall_grace {
+                if jump {
+                    self.wall_jump(host, &run, feet);
+                    return true;
+                }
+                self.wall_grace = (left > 1).then_some((run, left - 1));
+            }
+            let side = [self.senses.wall_left, self.senses.wall_right]
+                .into_iter()
+                .flatten()
+                .filter(|w| self.last_wall != Some(w.normal))
+                .min_by(|a, b| a.distance.total_cmp(&b.distance));
+            let can = self.tracker.current == Move::Air
+                && self.tracker.free_fall()
+                && self.walls_used < wallrun::MAX_WALLS
+                && side.is_some_and(|w| {
+                    wallrun::can_run_side(&w, self.facing, last, input, self.senses.drop)
+                });
+            let Some(wall) = side.filter(|_| can) else { return false };
+            self.wallrun = Some(WallRun::side(&wall, last));
+            self.walls_used += 1;
+            self.last_wall = Some(wall.normal);
+            self.wall_grace = None;
+            self.tracker.hold(Move::WallRunSide);
+            host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 1.0, 0);
+            return true;
+        };
+        let step = run.tick(wall, last, self.tracker.on_ground(), self.facing, input, jump);
+        match step.end {
+            None => {
+                // Subiendo, en cuanto el borde queda al alcance de las manos se agarra.
+                if run.kind == Kind::Up
+                    && !self.grab_locked
+                    && let Some(ledge) = self.senses.ledge
+                    && mantle::can_grab(&ledge, self.facing, last[1], input)
+                {
+                    self.wallrun = None;
+                    self.tracker.stop();
+                    self.grab(host, &ledge, feet);
+                    return true;
+                }
+                host.push_player(step.push.map(|v| v as f32));
+                self.wallrun = Some(run);
+                self.tracker.hold(if run.kind == Kind::Side { Move::WallRunSide } else { Move::WallRunUp });
+                if run.ticks % STRIDE_TICKS == 0 {
+                    host.play_local_sound("minecraft:block.stone.step", feet, 0.5, 1.1, 0);
+                }
+            }
+            Some(wallrun::End::Jump) => {
+                self.wallrun = None;
+                self.tracker.stop();
+                self.wall_jump(host, &run, feet);
+            }
+            Some(end) => {
+                self.wallrun = None;
+                self.tracker.stop();
+                self.wall_grace = end.allows_grace().then_some((run, wallrun::GRACE_TICKS));
+            }
+        }
+        true
+    }
+
+    /// Impulsarse desde la pared de `run`.
+    fn wall_jump(&mut self, host: &mut dyn Host, run: &WallRun, feet: [f64; 3]) {
+        host.push_player(run.kick(self.tracker.vel).map(|v| v as f32));
+        self.wall_grace = None;
+        self.effect = Some((Effect::WallJump, Instant::now()));
+        host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 0.8, 0);
+        host.play_local_sound("minecraft:item.armor.equip_leather", feet, 0.7, 1.3, 0);
+    }
+
+    /// Se agarra a `ledge` y empieza el mantle.
+    fn grab(&mut self, host: &mut dyn Host, ledge: &sense::Ledge, feet: [f64; 3]) {
+        self.mantle = Some(Mantle::grab(ledge));
+        self.tracker.hold(Move::Mantle);
+        self.effect = Some((Effect::Grab, Instant::now()));
+        host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 0.7, 0);
+        self.hold_fall(host, true);
+    }
+
     /// Agarrarse a una repisa y subir. Devuelve si el mantle manda este tick (entonces no hay
     /// aterrizaje que decidir).
     fn mantle(&mut self, host: &mut dyn Host, feet: [f64; 3], yaw: f32) -> bool {
@@ -456,11 +627,7 @@ impl Inner {
                     )
             });
             let Some(ledge) = grab else { return false };
-            self.mantle = Some(Mantle::grab(&ledge));
-            self.tracker.hold(Move::Mantle);
-            self.effect = Some((Effect::Grab, Instant::now()));
-            host.play_local_sound("minecraft:block.stone.step", feet, 1.0, 0.7, 0);
-            self.hold_fall(host, true);
+            self.grab(host, &ledge, feet);
             return true;
         };
         let step = mantle.tick(feet, self.tracker.vel, self.tracker.on_ground(), self.tracker.input);
