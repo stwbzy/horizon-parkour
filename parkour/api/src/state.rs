@@ -62,6 +62,13 @@ pub struct Tracker {
     ground: bool,
     /// Altura máxima desde que dejó el suelo, para la distancia de caída.
     apex: f64,
+    /// Bloques caídos, sólo en el tick en que toca suelo.
+    pub landed: Option<f64>,
+    /// Ticks desde que pulsó agacharse en el aire (no cuenta llevarlo pulsado desde el suelo).
+    pub since_sneak: Option<u32>,
+    sneak_was_down: bool,
+    /// Un movimiento en curso y los ticks que le quedan: manda sobre suelo/aire/carrera.
+    busy: Option<(Move, u32)>,
 }
 
 impl Tracker {
@@ -78,8 +85,9 @@ impl Tracker {
         self.pos.map_or(0.0, |p| (self.apex - p[1]).max(0.0))
     }
 
-    /// Un tick del cliente con la posición nueva del jugador y si pisa suelo. Un salto de más de 8 bloques es un
-    /// teletransporte (o cambio de mundo): se reinicia en vez de contarlo como velocidad.
+    /// Un tick del cliente con la posición nueva del jugador y si pisa suelo. Un salto de más de
+    /// 8 bloques es un teletransporte (o cambio de mundo): se reinicia en vez de contarlo como
+    /// velocidad.
     pub fn tick(&mut self, pos: [f64; 3], ground: bool) {
         let vel = match self.pos {
             Some(prev) => [pos[0] - prev[0], pos[1] - prev[1], pos[2] - prev[2]],
@@ -95,14 +103,30 @@ impl Tracker {
             };
             return;
         }
+        let was_airborne = self.pos.is_some() && !self.ground;
         self.pos = Some(pos);
         self.vel = vel;
         self.ground = ground;
-        if self.on_ground() {
+        self.landed = (ground && was_airborne).then(|| (self.apex - pos[1]).max(0.0));
+        if ground {
             self.apex = pos[1];
+            // En el tick del aterrizaje aún hace falta saber si se agachó a tiempo.
+            if self.landed.is_none() {
+                self.since_sneak = None;
+            }
         } else {
             self.apex = self.apex.max(pos[1]);
+            self.since_sneak = if self.input.sneak && !self.sneak_was_down {
+                Some(0)
+            } else {
+                self.since_sneak.map(|t| t.saturating_add(1))
+            };
         }
+        self.sneak_was_down = self.input.sneak;
+        self.busy = match self.busy {
+            Some((mv, left)) if left > 1 => Some((mv, left - 1)),
+            _ => None,
+        };
         let next = self.classify();
         if next == self.current {
             self.ticks_in_move = self.ticks_in_move.saturating_add(1);
@@ -112,8 +136,17 @@ impl Tracker {
         }
     }
 
+    /// Empieza un movimiento que dura `ticks` ticks.
+    pub fn start(&mut self, mv: Move, ticks: u32) {
+        self.busy = Some((mv, ticks));
+        self.current = mv;
+        self.ticks_in_move = 0;
+    }
+
     fn classify(&self) -> Move {
-        if !self.on_ground() {
+        if let Some((mv, _)) = self.busy {
+            mv
+        } else if !self.on_ground() {
             Move::Air
         } else if self.speed_h() >= RUN_SPEED {
             Move::Run
@@ -161,6 +194,53 @@ mod tests {
         }
         assert_eq!(t.current, Move::Air);
         assert!((t.fall_distance() - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn landing_reports_the_fall_once() {
+        let mut t = Tracker::default();
+        t.tick([0.0, 70.0, 0.0], true);
+        t.tick([0.0, 68.0, 0.0], false);
+        assert_eq!(t.landed, None);
+        t.tick([0.0, 65.0, 0.0], true);
+        assert_eq!(t.landed, Some(5.0));
+        t.tick([0.0, 65.0, 0.0], true);
+        assert_eq!(t.landed, None);
+    }
+
+    #[test]
+    fn only_a_sneak_pressed_in_the_air_counts() {
+        let mut t = Tracker::default();
+        // Agachado desde el suelo: no cuenta al caer.
+        t.input.sneak = true;
+        t.tick([0.0, 70.0, 0.0], true);
+        t.tick([0.0, 69.0, 0.0], false);
+        assert_eq!(t.since_sneak, None);
+        // Soltar y volver a pulsar en el aire: sí.
+        t.input.sneak = false;
+        t.tick([0.0, 68.0, 0.0], false);
+        t.input.sneak = true;
+        t.tick([0.0, 67.0, 0.0], false);
+        assert_eq!(t.since_sneak, Some(0));
+        t.tick([0.0, 66.0, 0.0], false);
+        assert_eq!(t.since_sneak, Some(1));
+        // Sigue disponible en el tick del aterrizaje y se borra después.
+        t.tick([0.0, 65.0, 0.0], true);
+        assert_eq!(t.since_sneak, Some(1));
+        t.tick([0.0, 65.0, 0.0], true);
+        assert_eq!(t.since_sneak, None);
+    }
+
+    #[test]
+    fn a_started_move_holds_for_its_ticks() {
+        let mut t = Tracker::default();
+        t.tick([0.0, 64.0, 0.0], true);
+        t.start(Move::Roll, 3);
+        t.tick([0.0, 64.0, 0.0], true);
+        t.tick([0.0, 64.0, 0.0], true);
+        assert_eq!(t.current, Move::Roll);
+        t.tick([0.0, 64.0, 0.0], true);
+        assert_eq!(t.current, Move::Idle);
     }
 
     #[test]

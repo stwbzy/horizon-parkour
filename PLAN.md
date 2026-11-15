@@ -1,6 +1,6 @@
 # Parkour — mod de parkour cinemático para Horizon (Minecraft 26.3 en Rust)
 
-Fecha: 2026-11-14 · Estado: fases 0 y 1 hechas (esqueleto, HUD de depuración, sensores); siguiente: fase 2 (aterrizaje y roll)
+Fecha: 2026-11-14 · Estado: fases 0 a 2 hechas (esqueleto, sensores, aterrizaje y roll); siguiente: fase 3 (mantle y hang)
 Mod hermano de `~/Proyectos/horizon-armas` (Arsenal): misma instancia, mismas rutas, mismo flujo de build.
 
 ## 1. Rutas y base técnica (reutilizado de Arsenal)
@@ -176,6 +176,19 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
   geométrico, así que la deducción por velocidad vertical de la fase 0 desaparece.
 - Las cajas se piden una vez por bloque y tick (cache en `client.rs`).
 - Las normales de pared están alineadas a ejes (la cara del bloque tocado).
+
+### Notas de la fase 2
+- Reglas en `land.rs`: corriendo ×0.75, agachado ×0.5, roll ×0.15 (y 0 hasta 8 bloques). "Agachado" exige
+  **pulsar** agacharse en el aire, hasta 12 ticks (0.6 s) antes del impacto; llevarlo pulsado desde el suelo no cuenta.
+- `camera_shake` está limitado por el motor a 10° y 0.5 bloques por eje (y lo escala el ajuste Distortion
+  Effects). Los giros pequeños van por ahí; la voltereta (360° de pitch) y la bajada de cámara van por
+  `camera_pose`. Con Cinemática < 100 % el roll no da la vuelta, sólo cabecea. **El wall-run inclinado queda
+  limitado a 10° de roll.**
+- Red: `parkour:hello` → `parkour:id` (el cliente aprende su id de entidad, porque `living_fall` sólo da ids) y
+  `parkour:land` (cómo va a aterrizar; el servidor lo olvida a los 1.5 s). En un jugador el cliente y el
+  servidor comparten proceso y se usa directamente lo decidido por el cliente.
+- Un aterrizaje sólo cuenta si se llega al suelo rápido (vy ≤ −0.45): bajar una escalera de mano no anima nada.
+- Durante el roll (12 ticks) el input se fuerza hacia delante, sin salto ni agachado.
 
 ## 9. Riesgos y mitigaciones
 - **Anticheat/vanilla del servidor** corrige movimientos agresivos → velocidades conservadoras, impulsos cortos y configurables.
