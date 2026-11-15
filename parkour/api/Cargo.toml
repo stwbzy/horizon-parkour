@@ -1,0 +1,10 @@
+[package]
+name = "mod-parkour"
+version = "0.1.0"
+license = "MIT"
+edition = "2024"
+
+[dependencies]
+# El launcher lo reapunta a la fuente de Horizon con la que compila el juego.
+# Cualquier otra dependencia debe estar en el Cargo.lock de Horizon.
+horizon-client = { git = "https://github.com/horizon-rust/horizon" }

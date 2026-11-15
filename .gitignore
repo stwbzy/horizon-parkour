@@ -1,0 +1,6 @@
+/parkour/api/target
+/target
+*.hnmod
+/dist
+/ref
+__pycache__/

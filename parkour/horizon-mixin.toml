@@ -1,0 +1,13 @@
+# Parkour: movimiento de parkour cinemático para Horizon (trait mod, docs/native-mods.md "Trait mods").
+# Compilar: tools/dev_build.sh (instancia parkour-dev).
+[mod]
+id = "parkour"
+version = "0.1.0"
+
+# Commit de Horizon con el que está probado (Nightly 2026-11-08). Un .hnmod debe declararlo igual
+# en horizon-native.json. Sólo usamos hooks del catálogo + Host.
+[compatibility]
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
+
+[api]
+path = "api"
