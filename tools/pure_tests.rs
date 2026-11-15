@@ -8,6 +8,8 @@ pub mod cinematic;
 pub mod config;
 #[path = "../parkour/api/src/fx.rs"]
 pub mod fx;
+#[path = "../parkour/api/src/guard.rs"]
+pub mod guard;
 #[path = "../parkour/api/src/land.rs"]
 pub mod land;
 #[path = "../parkour/api/src/mantle.rs"]

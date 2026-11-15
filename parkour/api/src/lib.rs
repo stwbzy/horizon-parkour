@@ -4,7 +4,10 @@
 //! Reglas de compatibilidad: los efectos de cámara, FOV y manos se suman a los de otros mods,
 //! nunca los reemplazan; no hay teclas propias (todo es contextual con salto, sprint y agacharse).
 //!
-//! Hecho hasta la fase 6 (ver PLAN.md): seguimiento del jugador, sensores, HUD de depuración,
+//! Multijugador: el cliente sólo hace parkour si el servidor tiene el mod con la misma versión
+//! y lo permite (`net::Welcome`); el servidor comprueba lo que dicen los clientes (`guard`).
+//!
+//! Hecho hasta la fase 7 (ver PLAN.md): seguimiento del jugador, sensores, HUD de depuración,
 //! ajustes, el aterrizaje (correr, agacharse o rodar al caer quita daño de caída), el mantle
 //! (agarrarse a una repisa en el aire y subir a pulso, o quedarse colgado), el vault (saltar
 //! corriendo un obstáculo bajo), el slide (agacharse corriendo para deslizarse) y el wall-run
@@ -14,6 +17,7 @@
 pub mod cinematic;
 pub mod config;
 pub mod fx;
+pub mod guard;
 pub mod land;
 pub mod mantle;
 pub mod net;
@@ -78,7 +82,9 @@ impl Hooks for Parkour {
 
     fn player_logged_in(&self, host: &mut dyn Host, event: &mut PlayerLoggedInEvent<'_>) {
         let line = format!(
-            "[Parkour {}] cargado. Al caer: corre y pulsa agacharse en el aire para rodar.",
+            "[Parkour {}] Este servidor tiene Parkour (hace falta el mod también en tu juego). \
+             Corre y salta cerca de paredes, repisas y obstáculos; agáchate corriendo para \
+             deslizarte. Ajustes en Opciones > Mods > Parkour.",
             env!("CARGO_PKG_VERSION"),
         );
         host.tell(event.player, Text::literal(line));
@@ -134,6 +140,8 @@ impl Hooks for Parkour {
     fn tick(&self, host: &mut dyn Host, _event: &mut TickEvent) {
         if host.window() {
             self.client.tick(host);
+        } else {
+            self.server.tick(host);
         }
     }
 

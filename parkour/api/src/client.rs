@@ -60,6 +60,10 @@ const WALL_HAND_FORWARD: f32 = 0.12;
 const GRASS_TINT: u32 = 0x7CBD_6B;
 /// Cuánto se acerca el FOV de la velocidad a su valor en cada tick.
 const FOV_EASE: f32 = 0.2;
+/// Ticks sin bienvenida del servidor tras los que se avisa de que el parkour está apagado.
+const NO_WELCOME_TICKS: u32 = 200;
+/// Lo que dura ese aviso en pantalla.
+const NOTICE: Duration = Duration::from_secs(8);
 
 #[derive(Default)]
 pub struct Client {
@@ -72,6 +76,12 @@ struct Inner {
     senses: Senses,
     /// El id de red del jugador, cuando el servidor lo ha dicho.
     own_id: Option<u32>,
+    /// Lo que deja el servidor (`net::ALLOW_*`), de su bienvenida. Sin bienvenida, nada: un
+    /// servidor sin el mod (o con otra versión) no ha dado permiso para moverse así.
+    allowed: u8,
+    /// Ticks en el mundo esperando la bienvenida, y hasta cuándo se ve el aviso de que no llegó.
+    waiting: u32,
+    notice: Option<Instant>,
     hello_wait: u32,
     /// Cómo va a aterrizar (o acaba de hacerlo) y cuándo se decidió.
     landing: Option<(Landing, Instant)>,
@@ -271,10 +281,13 @@ impl Client {
 
     pub fn net_from_server(&self, event: &NetFromServerEvent<'_>) {
         if event.channel == net::ID
-            && let Some(id) = net::decode_id(event.data)
+            && let Some(welcome) = net::Welcome::decode(event.data)
+            && welcome.protocol == net::PROTOCOL
             && let Ok(mut inner) = self.inner.lock()
         {
-            inner.own_id = Some(id);
+            inner.own_id = Some(welcome.id);
+            inner.allowed = welcome.flags;
+            inner.notice = None;
         }
     }
 
@@ -358,6 +371,7 @@ impl Client {
     }
 
     pub fn hud(&self, host: &dyn Host, event: &mut HudEvent<'_>) {
+        self.notice(host, event);
         let shown = host.setting(crate::NAMESPACE, config::DEBUG_HUD.key);
         if config::DEBUG_HUD.value(shown.as_deref()) != "sí" {
             return;
@@ -416,8 +430,14 @@ impl Client {
             format!("obstáculo {obstacle}"),
             format!("techo {:.2}  vacío {:.1}", senses.headroom, senses.drop),
             format!(
-                "aterrizaje {landing}  id {}",
-                inner.own_id.map_or("?".to_owned(), |id| id.to_string())
+                "aterrizaje {landing}  id {}  servidor {}",
+                inner.own_id.map_or("?".to_owned(), |id| id.to_string()),
+                match (inner.own_id.is_some(), inner.moves(), inner.allowed & net::ALLOW_FALL != 0) {
+                    (false, _, _) => "sin mod",
+                    (true, true, true) => "todo",
+                    (true, true, false) => "sin daño",
+                    (true, false, _) => "sin movimientos",
+                }
             ),
         ];
         drop(inner);
@@ -446,6 +466,23 @@ fn wall_block(feet: [f64; 3], toward: [f64; 2]) -> [i32; 3] {
         (feet[1] + 1.0).floor() as i32,
         (feet[2] + toward[1] * reach).floor() as i32,
     ]
+}
+
+impl Client {
+    /// Si el servidor no contestó, un aviso unos segundos arriba a la derecha.
+    fn notice(&self, host: &dyn Host, event: &mut HudEvent<'_>) {
+        let Ok(inner) = self.inner.lock() else { return };
+        if !inner.notice.is_some_and(|at| at.elapsed() < NOTICE) {
+            return;
+        }
+        drop(inner);
+        let line = "Parkour desactivado: este servidor no tiene el mod";
+        let width = host.text_width(line) + 2.0 * PAD;
+        let height = LINE_H + 2.0 * PAD;
+        let (x, y) = event.corners.place(Corner::TopRight, width, height);
+        host.fill(event.batch, [x, y, width, height], 0x7800_0000);
+        host.text(event.batch, line, [x + PAD, y + PAD], 0x00FF_D060, true);
+    }
 }
 
 impl Inner {
@@ -505,8 +542,12 @@ impl Inner {
         if self.own_id.is_some() {
             return;
         }
+        self.waiting = self.waiting.saturating_add(1);
+        if self.waiting == NO_WELCOME_TICKS {
+            self.notice = Some(Instant::now());
+        }
         if self.hello_wait == 0 {
-            let _ = host.net_send_to_server(net::HELLO, &[]);
+            let _ = host.net_send_to_server(net::HELLO, &[net::PROTOCOL]);
             self.hello_wait = HELLO_EVERY;
         } else {
             self.hello_wait -= 1;
@@ -521,7 +562,7 @@ impl Inner {
             || self.slide.is_some()
             || self.wallrun.is_some()
             || self.tracker.current == Move::Roll;
-        let Some(feet) = self.tracker.pos.filter(|_| !busy) else { return };
+        let Some(feet) = self.tracker.pos.filter(|_| !busy && self.moves()) else { return };
         let t = &self.tracker;
         // Desde el suelo, o recién despegado de un salto (aún subiendo).
         let launch = t.on_ground() || (t.current == Move::Air && t.ticks_in_move <= 3 && t.vel[1] > 0.0);
@@ -652,7 +693,8 @@ impl Inner {
                 .flatten()
                 .filter(|w| self.last_wall != Some(w.normal))
                 .min_by(|a, b| a.distance.total_cmp(&b.distance));
-            let can = self.tracker.current == Move::Air
+            let can = self.moves()
+                && self.tracker.current == Move::Air
                 && self.tracker.free_fall()
                 && self.walls_used < wallrun::MAX_WALLS
                 && side.is_some_and(|w| {
@@ -751,7 +793,8 @@ impl Inner {
         }
         let Some(mut mantle) = self.mantle else {
             let grab = self.senses.ledge.filter(|ledge| {
-                self.tracker.current == Move::Air
+                self.moves()
+                    && self.tracker.current == Move::Air
                     && self.tracker.free_fall()
                     && !self.grab_locked
                     && mantle::can_grab(
@@ -802,6 +845,20 @@ impl Inner {
         }
     }
 
+    /// El servidor deja usar los movimientos.
+    fn moves(&self) -> bool {
+        self.allowed & net::ALLOW_MOVES != 0
+    }
+
+    /// Cómo se aterrizaría ahora. Si el servidor no quita daño de caída, siempre a plomo: rodar
+    /// sin que sirva de nada engañaría.
+    fn classify_landing(&self) -> Landing {
+        if self.allowed & net::ALLOW_FALL == 0 {
+            return Landing::Plain;
+        }
+        Landing::classify(self.running(), self.tracker.since_sneak)
+    }
+
     fn running(&self) -> bool {
         self.tracker.speed_h() >= RUN_SPEED
     }
@@ -818,7 +875,7 @@ impl Inner {
         if self.tracker.fall_distance() < WARN_FALL {
             return;
         }
-        let landing = Landing::classify(self.running(), self.tracker.since_sneak);
+        let landing = self.classify_landing();
         self.landing = Some((landing, Instant::now()));
         let (last, age) = self.sent;
         if landing != last || (landing != Landing::Plain && age >= LAND_EVERY) {
@@ -831,7 +888,7 @@ impl Inner {
 
     /// Acaba de tocar suelo tras caer `fall` bloques.
     fn land(&mut self, host: &mut dyn Host, fall: f64, feet: [f64; 3], yaw: f32) {
-        let landing = Landing::classify(self.running(), self.tracker.since_sneak);
+        let landing = self.classify_landing();
         self.landing = Some((landing, Instant::now()));
         if landing != self.sent.0 {
             let _ = host.net_send_to_server(net::LAND, &[landing.to_byte()]);

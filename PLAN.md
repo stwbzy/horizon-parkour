@@ -1,6 +1,6 @@
 # Parkour — mod de parkour cinemático para Horizon (Minecraft 26.3 en Rust)
 
-Fecha: 2026-11-14 · Estado: fases 0 a 6 hechas (esqueleto, sensores, aterrizaje y roll, mantle y hang, vault y slide, wall-run y wall jump, capa cinemática); siguiente: fase 7 (multijugador, anticheat, empaquetado y release)
+Fecha: 2026-11-14 · Estado: fases 0 a 7 hechas; versión preliminar 0.1.0 publicada. Siguiente: pruebas en el juego y ajustes (fases 3 a 7 sin probar a fondo)
 Mod hermano de `~/Proyectos/horizon-armas` (Arsenal): misma instancia, mismas rutas, mismo flujo de build.
 
 ## 1. Rutas y base técnica (reutilizado de Arsenal)
@@ -251,6 +251,24 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
   (`Hand::Main` a la derecha).
 - Descartado en v1: hitstop/timewarp (los mods no controlan el tiempo de render), viento en bucle (no hay sonido
   en bucle para mods de cliente), 3ª persona animada (decisión 3).
+
+### Notas de la fase 7
+- **Consentimiento del servidor**: el cliente sólo hace parkour tras la bienvenida del servidor (`parkour:id`,
+  `net::Welcome`: id de entidad, protocolo y permisos `ALLOW_MOVES` / `ALLOW_FALL`). El `HELLO` lleva la versión
+  de protocolo (`net::PROTOCOL` = 1); con otra, el servidor avisa una vez por el chat y no contesta. Sin
+  bienvenida en 10 s, aviso arriba a la derecha y el parkour queda apagado (servidores sin el mod). Sin
+  `ALLOW_FALL`, los aterrizajes se clasifican siempre a plomo (no se rueda para nada).
+- **Ajustes del servidor**: `config/parkour-server.txt` (`moves`, `fall_damage`, `validate`), creado con los
+  valores de fábrica, releído cada 200 ticks (`config::ServerConfig`).
+- **Comprobaciones propias** (`guard.rs`): el `tick` del servidor guarda 60 ticks de posiciones de cada jugador
+  (`server_players`). Roll y carrera exigen ≥ 0.15 b/t de media en los últimos 6 ticks (si no, roll → agachado,
+  carrera → a plomo); "agarrado" exige estar ≥ 0.5 sobre lo más bajo de esos 3 s (si no, a plomo). Máximo 20
+  mensajes por segundo y jugador. El jugador local (un jugador, anfitrión de LAN) usa lo decidido por su cliente.
+- **Anticheat de Horizon**: `prediction` (sólo registra por defecto) ve los empujes de cliente como movimientos
+  inexplicables; `ground` y `combat` no se ven afectados. README: dejar `prediction` en sólo registrar. Que el
+  servidor mande él los empujes (lo que la doc recomienda) haría los movimientos lentos con latencia; no en v1.
+- **Servidor dedicado**: `native-build parkour --server-output DIR` compila el motor con el mod (comprobado).
+- **Release**: `parkour.hnmod` adjunto a la release de GitHub (lo que instala "Add from GitHub"); sin `.hmod`.
 
 ## 9. Riesgos y mitigaciones
 - **Anticheat/vanilla del servidor** corrige movimientos agresivos → velocidades conservadoras, impulsos cortos y configurables.
