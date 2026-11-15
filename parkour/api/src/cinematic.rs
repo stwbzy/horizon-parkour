@@ -36,6 +36,8 @@ pub enum Effect {
     Grab,
     /// Pasar por encima del borde al acabar de subir.
     MantleOver,
+    /// Apoyar las manos y saltar un obstáculo.
+    Vault,
 }
 
 /// Lo que dura la voltereta, en segundos y en ticks.
@@ -64,6 +66,7 @@ impl Effect {
             Effect::HardLanding { .. } => 0.45,
             Effect::Grab => 0.3,
             Effect::MantleOver => 0.45,
+            Effect::Vault => 0.5,
         }
     }
 
@@ -140,7 +143,54 @@ impl Effect {
                 hand_drop: 0.5 * arc,
                 hand_pitch: 25.0 * arc,
             },
+            Effect::Vault => {
+                // Mira al obstáculo al apoyarse, se ladea al pasar y sale con un pico de FOV.
+                let lean = kick(u, 0.35);
+                Pose {
+                    spin: 0.0,
+                    pitch: 6.0 * lean * k,
+                    roll: -5.0 * arc * k,
+                    drop: 0.15 * lean * k.min(1.0),
+                    fov: 1.0 + 0.05 * (PI * u * u).sin().max(0.0) * k,
+                    hand_drop: 0.35 * lean,
+                    hand_pitch: 30.0 * lean,
+                }
+            }
         })
+    }
+}
+
+/// La pose del slide con `amount` (0 a 1) de deslizamiento: la cámara baja al suelo, se ladea un
+/// poco y el FOV se abre. A diferencia de los efectos, dura lo que dura el slide.
+pub fn slide_pose(amount: f32, intensity: f32) -> Pose {
+    let a = amount.clamp(0.0, 1.0);
+    let k = intensity.clamp(0.0, 1.5);
+    if a == 0.0 || k == 0.0 {
+        return Pose::NONE;
+    }
+    Pose {
+        spin: 0.0,
+        pitch: -2.0 * a * k,
+        roll: 4.0 * a * k,
+        drop: 0.55 * a * k.min(1.0),
+        fov: 1.0 + 0.06 * a * k,
+        hand_drop: 0.2 * a,
+        hand_pitch: -8.0 * a,
+    }
+}
+
+impl Pose {
+    /// Dos poses a la vez: se suman, y el FOV se multiplica.
+    pub fn and(self, other: Pose) -> Pose {
+        Pose {
+            spin: self.spin + other.spin,
+            pitch: self.pitch + other.pitch,
+            roll: self.roll + other.roll,
+            drop: self.drop + other.drop,
+            fov: self.fov * other.fov,
+            hand_drop: self.hand_drop + other.hand_drop,
+            hand_pitch: self.hand_pitch + other.hand_pitch,
+        }
     }
 }
 
@@ -148,12 +198,13 @@ impl Effect {
 mod tests {
     use super::*;
 
-    const ALL: [Effect; 5] = [
+    const ALL: [Effect; 6] = [
         Effect::Roll,
         Effect::SoftLanding { strength: 1.0 },
         Effect::HardLanding { strength: 1.0 },
         Effect::Grab,
         Effect::MantleOver,
+        Effect::Vault,
     ];
 
     #[test]
@@ -196,6 +247,17 @@ mod tests {
                 assert!(pose.pitch.abs() <= 10.0 && pose.roll.abs() <= 10.0, "{effect:?} {pose:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_slide_pose_follows_its_amount() {
+        assert_eq!(slide_pose(0.0, 1.0), Pose::NONE);
+        assert_eq!(slide_pose(1.0, 0.0), Pose::NONE);
+        let full = slide_pose(1.0, 1.5);
+        assert!(full.drop > 0.5 && full.fov > 1.0 && full.roll.abs() <= 10.0);
+        // Con un efecto encima, los giros siguen dentro del límite.
+        let both = full.and(Effect::Vault.pose(0.2, 1.5).expect("dura"));
+        assert!(both.roll.abs() <= 10.0 && both.pitch.abs() <= 10.0, "{both:?}");
     }
 
     #[test]

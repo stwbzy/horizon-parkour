@@ -17,6 +17,12 @@ pub const WALL_REACH: f64 = 0.7;
 pub const LEDGE_MAX: f64 = 3.3;
 /// Hasta dónde se mide el vacío bajo los pies.
 pub const DROP_MAX: f64 = 16.0;
+/// Altura máxima de un obstáculo que se salta (vault): una valla mide 1.5.
+pub const VAULT_MAX: f64 = 1.55;
+/// Hasta dónde se busca delante el obstáculo de un vault.
+pub const VAULT_REACH: f64 = 1.0;
+/// Fondo máximo de un obstáculo que se pasa por encima; si es más hondo se acaba encima de él.
+pub const VAULT_DEPTH: f64 = 1.5;
 
 const EPS: f64 = 1e-6;
 
@@ -67,6 +73,25 @@ pub struct Ledge {
     pub crouch_only: bool,
 }
 
+/// Un obstáculo bajo delante, para saltarlo apoyando las manos (vault).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Obstacle {
+    /// Altura del borde sobre los pies.
+    pub height: f64,
+    /// Y del borde en el mundo.
+    pub top: f64,
+    /// Distancia horizontal hasta su cara.
+    pub distance: f64,
+    pub normal: [f64; 2],
+    /// Cuánto hay que avanzar (desde los pies, en la dirección del barrido) para que la caja del
+    /// jugador quede pasada: al otro lado si es fino, de pie encima si es hondo.
+    pub clear: f64,
+    /// Es hondo: se acaba encima de él, no al otro lado.
+    pub onto: bool,
+    /// Sólo se pasa agachado (hay algo encima a menos de 1.8).
+    pub crouch: bool,
+}
+
 /// Todo lo que los sensores leen en un tick.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Senses {
@@ -75,6 +100,7 @@ pub struct Senses {
     pub wall_right: Option<Wall>,
     pub wall_front: Option<Wall>,
     pub ledge: Option<Ledge>,
+    pub obstacle: Option<Obstacle>,
     /// Espacio libre sobre la cabeza (de pie), hasta 2 bloques.
     pub headroom: f64,
     /// Vacío bajo los pies, hasta `DROP_MAX`.
@@ -91,6 +117,7 @@ pub fn sense(world: &impl World, feet: [f64; 3], yaw_deg: f32) -> Senses {
         wall_right: tall_wall(world, feet, rgt),
         wall_front: tall_wall(world, feet, fwd),
         ledge: ledge(world, feet, fwd),
+        obstacle: obstacle(world, feet, fwd),
         headroom: headroom(world, feet),
         drop: drop_below(world, feet),
     }
@@ -265,6 +292,88 @@ pub fn ledge(world: &impl World, feet: [f64; 3], dir: [f64; 2]) -> Option<Ledge>
         });
     }
     None
+}
+
+/// Un obstáculo bajo (más que un escalón, hasta `VAULT_MAX`) delante, con sitio por encima para
+/// pasar al menos agachado. Lo fino (vallas, un bloque) se pasa; lo hondo se sube.
+pub fn obstacle(world: &impl World, feet: [f64; 3], dir: [f64; 2]) -> Option<Obstacle> {
+    let wall = sweep(world, feet, dir, VAULT_REACH, feet[1] + STEP_HEIGHT, feet[1] + VAULT_MAX)?;
+    let at = |s: f64| [feet[0] + dir[0] * s, feet[1], feet[2] + dir[1] * s];
+    // El borde: lo más bajo que asoma por encima del escalón en un punto justo dentro.
+    let inside = at(wall.distance + HALF_WIDTH + 0.05);
+    let column = [
+        inside[0] - 0.05,
+        feet[1] + STEP_HEIGHT,
+        inside[2] - 0.05,
+        inside[0] + 0.05,
+        feet[1] + VAULT_MAX + 0.5,
+        inside[2] + 0.05,
+    ];
+    let top = boxes_near(world, column)
+        .iter()
+        .filter(|b| overlaps(&column, b))
+        .map(|b| b[4])
+        .filter(|top| *top > feet[1] + STEP_HEIGHT)
+        .fold(f64::INFINITY, f64::min);
+    if top > feet[1] + VAULT_MAX + EPS {
+        return None;
+    }
+    // Dónde queda libre la caja al otro lado, por debajo del borde: ahí se ha pasado.
+    let past = wall.distance + 2.0 * HALF_WIDTH + 0.05;
+    let beyond = (0..=(VAULT_DEPTH * 10.0) as i32).map(|i| past + 0.1 * f64::from(i)).find(|&s| {
+        let mut body = player_box(at(s), 0.0);
+        body[1] = feet[1] + STEP_HEIGHT;
+        body[4] = top - EPS;
+        is_free(world, body)
+    });
+    let (clear, onto) = match beyond {
+        Some(s) => (s, false),
+        None => (past, true),
+    };
+    // El camino por encima: desde donde está hasta pasado, con el cuerpo sobre el borde.
+    let (from, to) = (at(0.0), at(clear));
+    let path = |height: f64| {
+        [
+            from[0].min(to[0]) - HALF_WIDTH,
+            top,
+            from[2].min(to[2]) - HALF_WIDTH,
+            from[0].max(to[0]) + HALF_WIDTH,
+            top + height,
+            from[2].max(to[2]) + HALF_WIDTH,
+        ]
+    };
+    if !is_free(world, path(CROUCH_HEIGHT)) {
+        return None;
+    }
+    // Y sitio sobre la cabeza para subir el cuerpo hasta el borde.
+    let mut shaft = player_box(feet, STAND_HEIGHT);
+    shaft[1] = feet[1] + STAND_HEIGHT;
+    shaft[4] = top + CROUCH_HEIGHT;
+    if shaft[4] > shaft[1] && !is_free(world, shaft) {
+        return None;
+    }
+    Some(Obstacle {
+        height: top - feet[1],
+        top,
+        distance: wall.distance,
+        normal: wall.normal,
+        clear,
+        onto,
+        crouch: !is_free(world, path(STAND_HEIGHT)),
+    })
+}
+
+/// Hay un techo bajo (se cabe agachado pero no de pie) donde está el jugador o justo delante en
+/// `dir`: para ir agachado al deslizarse por debajo.
+pub fn low_ceiling(world: &impl World, feet: [f64; 3], dir: [f64; 2]) -> bool {
+    [0.0, 0.4, 0.8].into_iter().any(|s| {
+        let p = [feet[0] + dir[0] * s, feet[1], feet[2] + dir[1] * s];
+        let mut head = player_box(p, STAND_HEIGHT);
+        head[1] = p[1] + CROUCH_HEIGHT;
+        let mut body = player_box(p, CROUCH_HEIGHT);
+        body[1] = p[1] + STEP_HEIGHT;
+        !is_free(world, head) && is_free(world, body)
+    })
 }
 
 /// Espacio libre sobre la cabeza de un jugador de pie, hasta 2 bloques.
@@ -458,6 +567,64 @@ mod tests {
         let world = Blocks::default().floor().with(0, 64, 1, fence);
         let ledge = sense(&world, FEET, SOUTH).ledge.expect("valla");
         assert!(close(ledge.height, 1.5));
+    }
+
+    #[test]
+    fn a_fence_is_vaulted_over() {
+        let fence = [0.375, 0.0, 0.375, 0.625, 1.5, 0.625];
+        let world = Blocks::default().floor().with(0, 64, 1, fence);
+        let ob = obstacle(&world, FEET, forward(SOUTH)).expect("valla");
+        assert!(close(ob.height, 1.5));
+        assert!(!ob.onto && !ob.crouch);
+        // Cara en z = 1.375: la caja pasa cuando su parte trasera deja atrás z = 1.625.
+        assert!(ob.clear >= 1.625 + HALF_WIDTH - FEET[2] - 1e-9, "{}", ob.clear);
+        assert!(ob.clear < 1.625 + HALF_WIDTH - FEET[2] + 0.11, "{}", ob.clear);
+    }
+
+    #[test]
+    fn a_deep_block_is_vaulted_onto() {
+        let world = Blocks::default().floor().pillar(0, 1, 1).pillar(0, 2, 1).pillar(0, 3, 1);
+        let ob = obstacle(&world, FEET, forward(SOUTH)).expect("plataforma");
+        assert!(ob.onto);
+        assert!(close(ob.clear, 0.2 + 0.65));
+        // Un solo bloque de fondo se pasa.
+        let world = Blocks::default().floor().pillar(0, 1, 1);
+        let ob = obstacle(&world, FEET, forward(SOUTH)).expect("bloque");
+        assert!(!ob.onto);
+    }
+
+    #[test]
+    fn walls_slabs_and_far_things_are_not_vaulted() {
+        let world = Blocks::default().floor().pillar(0, 1, 2);
+        assert_eq!(obstacle(&world, FEET, forward(SOUTH)), None);
+        let world = Blocks::default().floor().with(0, 64, 1, SLAB);
+        assert_eq!(obstacle(&world, FEET, forward(SOUTH)), None);
+        let world = Blocks::default().floor().pillar(0, 2, 1);
+        assert_eq!(obstacle(&world, FEET, forward(SOUTH)), None);
+    }
+
+    #[test]
+    fn a_window_over_the_obstacle_needs_crouching_or_blocks() {
+        // Hueco de 1.5 sobre el bloque (techo en y = 66.5 sobre él y al otro lado).
+        let roof = [0.0, 0.5, 0.0, 1.0, 1.0, 1.0];
+        let world = Blocks::default().floor().pillar(0, 1, 1).with(0, 66, 1, roof).with(0, 66, 2, roof);
+        let ob = obstacle(&world, FEET, forward(SOUTH)).expect("cabe agachado");
+        assert!(ob.crouch);
+        // Hueco de 1 bloque: no.
+        let world = Blocks::default().floor().pillar(0, 1, 1).full(0, 66, 1);
+        assert_eq!(obstacle(&world, FEET, forward(SOUTH)), None);
+    }
+
+    #[test]
+    fn a_low_ceiling_ahead_is_seen() {
+        // Techo a 1.5 delante (losa superior en y = 65.5).
+        let roof = [0.0, 0.5, 0.0, 1.0, 1.0, 1.0];
+        let world = Blocks::default().floor().with(0, 65, 1, roof);
+        assert!(low_ceiling(&world, FEET, [0.0, 1.0]));
+        assert!(!low_ceiling(&world, FEET, [0.0, -1.0]));
+        // Una pared no es un techo bajo.
+        let world = Blocks::default().floor().pillar(0, 1, 3);
+        assert!(!low_ceiling(&world, FEET, [0.0, 1.0]));
     }
 
     #[test]

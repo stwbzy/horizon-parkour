@@ -14,5 +14,9 @@ pub mod mantle;
 pub mod net;
 #[path = "../parkour/api/src/sense.rs"]
 pub mod sense;
+#[path = "../parkour/api/src/slide.rs"]
+pub mod slide;
 #[path = "../parkour/api/src/state.rs"]
 pub mod state;
+#[path = "../parkour/api/src/vault.rs"]
+pub mod vault;

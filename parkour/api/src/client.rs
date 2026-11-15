@@ -17,7 +17,9 @@ use crate::land::{self, Landing};
 use crate::mantle::{self, End, Mantle, Phase};
 use crate::net;
 use crate::sense::{self, Aabb, Senses, Wall};
+use crate::slide::{self, Slide};
 use crate::state::{Input, Move, RUN_SPEED, Tracker};
+use crate::vault::{self, Vault};
 
 const LINE_H: f32 = 10.0;
 const PAD: f32 = 3.0;
@@ -39,6 +41,11 @@ const HANDS_UP: f32 = 0.35;
 const HANDS_FORWARD: f32 = 0.15;
 /// Cuánto se acercan las manos a su postura en cada tick.
 const HANDS_EASE: f32 = 0.4;
+/// Lo mismo para la cámara al deslizarse.
+const SLIDE_EASE: f32 = 0.35;
+/// Avance que se deja pedir mientras el mod mueve al jugador: casi nada, pero cuenta como
+/// "adelante" y así el juego no le quita el sprint.
+const KEEP_SPRINT: f32 = 0.01;
 
 #[derive(Default)]
 pub struct Client {
@@ -68,6 +75,19 @@ struct Inner {
     grab_locked: bool,
     /// Manos levantadas hacia el borde, de 0 a 1: el tick anterior y éste, para interpolar.
     hands: [f32; 2],
+    /// Hacia dónde mira el jugador (de su yaw), con lo que se midió el obstáculo.
+    facing: [f64; 2],
+    /// El vault en curso, y si pide ir agachado.
+    vault: Option<Vault>,
+    vault_sneak: bool,
+    /// El slide en curso, si pide ir agachado (techo bajo) y los ticks hasta poder repetirlo.
+    slide: Option<Slide>,
+    slide_sneak: bool,
+    slide_cool: u32,
+    /// Cámara al ras del suelo por el slide, de 0 a 1: el tick anterior y éste.
+    sliding: [f32; 2],
+    /// Movimiento empezado en `movement_input`, para darle sonido y efecto en el tick.
+    started: Option<Move>,
 }
 
 /// El mundo de la ventana para los sensores. Guarda las cajas ya pedidas: en un tick los
@@ -94,6 +114,9 @@ impl Client {
         let feet = [player.x, player.y, player.z];
         let world = HostWorld { host: &*host, cache: RefCell::default() };
         inner.senses = sense::sense(&world, feet, player.yaw);
+        inner.facing = sense::forward(player.yaw);
+        let low_ceiling = inner.slide.is_some_and(|s| sense::low_ceiling(&world, feet, s.dir));
+        drop(world);
         let ground = inner.senses.ground;
         let fall_speed = inner.tracker.vel[1];
         inner.tracker.tick(feet, ground);
@@ -103,8 +126,11 @@ impl Client {
             config::CINEMATIC.value(stored.as_deref()).parse::<f32>().unwrap_or(100.0) / 100.0;
 
         inner.ask_own_id(host);
+        inner.announce(host, feet);
         let mantling = inner.mantle(host, feet, player.yaw);
-        if !mantling {
+        let vaulting = inner.vault(host, feet);
+        inner.slide(host, low_ceiling);
+        if !mantling && !vaulting {
             inner.warn_landing(host);
             if let Some(fall) = inner.tracker.landed
                 && fall >= land::MIN_FALL
@@ -116,19 +142,40 @@ impl Client {
         let raised = inner.mantle.is_some_and(|m| m.phase != Phase::Over);
         let now = inner.hands[1];
         inner.hands = [now, now + (f32::from(raised) - now) * HANDS_EASE];
+        let low = inner.slide.is_some();
+        let now = inner.sliding[1];
+        inner.sliding = [now, now + (f32::from(low) - now) * SLIDE_EASE];
     }
 
+    /// Aquí empiezan el vault (saltar corriendo hacia un obstáculo bajo) y el slide (agacharse
+    /// corriendo), para quitarle al juego ese mismo salto o agachado.
+    ///
     /// Mientras rueda, el jugador sigue hacia delante: no frena, no salta ni se queda agachado.
-    /// Agarrado a una repisa lo mueve el mantle, no las teclas.
+    /// Agarrado a una repisa, saltando un obstáculo o deslizando lo mueve el mod, no las teclas;
+    /// en vault y slide se deja un mínimo de avance para no perder el sprint.
     pub fn movement_input(&self, event: &mut MovementInputEvent) {
         let Ok(mut inner) = self.inner.lock() else { return };
-        inner.tracker.input = Input {
-            forward: event.forward,
-            strafe: event.strafe,
-            jump: event.jump,
-            sneak: event.sneak,
-        };
-        if inner.tracker.current == Move::Roll {
+        let input =
+            Input { forward: event.forward, strafe: event.strafe, jump: event.jump, sneak: event.sneak };
+        let sneak_pressed = input.sneak && !inner.tracker.input.sneak;
+        inner.tracker.input = input;
+        inner.try_start(input, sneak_pressed);
+        if inner.slide.is_some() && input.jump {
+            // Slide-jump: sale con la inercia y el salto del sprint.
+            inner.end_slide();
+            event.sneak = false;
+            return;
+        }
+        if inner.vault.is_some() {
+            event.forward = KEEP_SPRINT;
+            event.strafe = 0.0;
+            event.jump = false;
+            event.sneak = inner.vault_sneak;
+        } else if inner.slide.is_some() {
+            event.forward = KEEP_SPRINT;
+            event.strafe = 0.0;
+            event.sneak = inner.slide_sneak;
+        } else if inner.tracker.current == Move::Roll {
             event.forward = 1.0;
             event.jump = false;
             event.sneak = false;
@@ -159,20 +206,28 @@ impl Client {
         inner.landing.filter(|(_, at)| at.elapsed() < LANDING_FRESH).map(|(l, _)| l)
     }
 
-    /// La pose del efecto en curso, si hay alguno.
-    fn pose(&self) -> Option<Pose> {
+    /// La pose del efecto en curso más la del slide, si hay alguna. `partial` es la fracción de
+    /// tick para suavizar el slide.
+    fn pose(&self, partial: f32) -> Option<Pose> {
         let mut inner = self.inner.lock().ok()?;
-        let (effect, at) = inner.effect?;
-        let pose = effect.pose(at.elapsed().as_secs_f32(), inner.intensity);
-        if pose.is_none() {
+        let effect = inner.effect.and_then(|(effect, at)| {
+            effect.pose(at.elapsed().as_secs_f32(), inner.intensity)
+        });
+        if effect.is_none() {
             inner.effect = None;
         }
-        pose
+        let [before, now] = inner.sliding;
+        let amount = before + (now - before) * partial.clamp(0.0, 1.0);
+        let slide = (amount > 0.001).then(|| cinematic::slide_pose(amount, inner.intensity));
+        match (effect, slide) {
+            (Some(a), Some(b)) => Some(a.and(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// La voltereta y la bajada de cámara: giros grandes, que `camera_shake` no admite.
     pub fn camera_pose(&self, event: &mut CameraPoseEvent<'_>) {
-        if let Some(pose) = self.pose() {
+        if let Some(pose) = self.pose(event.partial) {
             event.pitch += pose.spin;
             event.position[1] -= f64::from(pose.drop);
         }
@@ -180,20 +235,20 @@ impl Client {
 
     /// Se suma a la sacudida de otros mods, nunca la reemplaza.
     pub fn camera_shake(&self, event: &mut CameraShakeEvent<'_>) {
-        if let Some(pose) = self.pose() {
+        if let Some(pose) = self.pose(event.partial) {
             event.shake.pitch += pose.pitch;
             event.shake.roll += pose.roll;
         }
     }
 
     pub fn compute_fov_modifier(&self, event: &mut ComputeFovModifierEvent<'_>) {
-        if let Some(pose) = self.pose() {
+        if let Some(pose) = self.pose(1.0) {
             event.modifier *= pose.fov;
         }
     }
 
     pub fn render_hand_pose(&self, event: &mut RenderHandPoseEvent<'_>) {
-        if let Some(pose) = self.pose() {
+        if let Some(pose) = self.pose(event.partial) {
             event.y -= pose.hand_drop;
             event.pitch -= pose.hand_pitch;
         }
@@ -226,6 +281,16 @@ impl Client {
                 if l.crouch_only { " (agachado)" } else { "" }
             )
         });
+        let obstacle = senses.obstacle.map_or("--".to_owned(), |o| {
+            format!(
+                "+{:.2} a {:.2}, {} {:.2}{}",
+                o.height,
+                o.distance,
+                if o.onto { "encima" } else { "pasa" },
+                o.clear,
+                if o.crouch { " (agachado)" } else { "" }
+            )
+        });
         let landing = inner.landing.map_or("--".to_owned(), |(l, at)| {
             format!("{} (hace {:.1} s)", l.name(), at.elapsed().as_secs_f32())
         });
@@ -252,6 +317,7 @@ impl Client {
                 wall(senses.wall_front)
             ),
             format!("repisa {ledge}"),
+            format!("obstáculo {obstacle}"),
             format!("techo {:.2}  vacío {:.1}", senses.headroom, senses.drop),
             format!(
                 "aterrizaje {landing}  id {}",
@@ -284,6 +350,91 @@ impl Inner {
         } else {
             self.hello_wait -= 1;
         }
+    }
+
+    /// Empieza un vault o un slide si el jugador lo pide ahora (desde `movement_input`, con los
+    /// sensores del último tick).
+    fn try_start(&mut self, input: Input, sneak_pressed: bool) {
+        let busy = self.mantle.is_some()
+            || self.vault.is_some()
+            || self.slide.is_some()
+            || self.tracker.current == Move::Roll;
+        let Some(feet) = self.tracker.pos.filter(|_| !busy) else { return };
+        let t = &self.tracker;
+        // Desde el suelo, o recién despegado de un salto (aún subiendo).
+        let launch = t.on_ground() || (t.current == Move::Air && t.ticks_in_move <= 3 && t.vel[1] > 0.0);
+        if launch
+            && let Some(ob) = self.senses.obstacle
+            && vault::can_vault(&ob, self.facing, t.speed_h(), input)
+        {
+            self.vault = Some(Vault::start(&ob, feet, self.facing, t.speed_h()));
+            self.vault_sneak = ob.crouch;
+            self.tracker.hold(Move::Vault);
+            self.started = Some(Move::Vault);
+            return;
+        }
+        if self.slide_cool == 0 && slide::can_slide(t.on_ground(), t.speed_h(), input, sneak_pressed) {
+            self.slide = Some(Slide::start(t.vel));
+            self.slide_sneak = false;
+            self.tracker.hold(Move::Slide);
+            self.started = Some(Move::Slide);
+        }
+    }
+
+    /// Sonido y efecto de cámara de lo que empezó en `movement_input`.
+    fn announce(&mut self, host: &mut dyn Host, feet: [f64; 3]) {
+        match self.started.take() {
+            Some(Move::Vault) => {
+                self.effect = Some((Effect::Vault, Instant::now()));
+                host.play_local_sound("minecraft:item.armor.equip_leather", feet, 0.8, 1.2, 0);
+            }
+            Some(Move::Slide) => {
+                host.play_local_sound("minecraft:block.gravel.step", feet, 1.0, 0.7, 0);
+                host.play_local_sound("minecraft:item.armor.equip_leather", feet, 0.6, 0.8, 0);
+            }
+            _ => {}
+        }
+    }
+
+    /// Un tick del vault en curso. Devuelve si lo hay.
+    fn vault(&mut self, host: &mut dyn Host, feet: [f64; 3]) -> bool {
+        let Some(mut v) = self.vault else { return false };
+        let step = v.tick(feet, self.tracker.vel, self.tracker.on_ground());
+        if step.over_started {
+            host.play_local_sound("minecraft:block.stone.step", feet, 0.9, 1.1, 0);
+        }
+        if step.end.is_some() {
+            self.vault = None;
+            self.vault_sneak = false;
+            self.tracker.stop();
+        } else {
+            host.push_player(step.push.map(|v| v as f32));
+            self.vault = Some(v);
+            self.vault_sneak = step.sneak;
+        }
+        true
+    }
+
+    /// Un tick del slide en curso. `low_ceiling`: hay techo bajo encima o delante.
+    fn slide(&mut self, host: &mut dyn Host, low_ceiling: bool) {
+        self.slide_cool = self.slide_cool.saturating_sub(1);
+        let Some(mut s) = self.slide else { return };
+        let step = s.tick(self.tracker.vel, self.tracker.on_ground(), self.tracker.input);
+        if step.end.is_some() {
+            self.end_slide();
+            return;
+        }
+        host.push_player(step.push.map(|v| v as f32));
+        self.slide = Some(s);
+        self.slide_sneak = low_ceiling;
+        self.tracker.hold(Move::Slide);
+    }
+
+    fn end_slide(&mut self) {
+        self.slide = None;
+        self.slide_sneak = false;
+        self.slide_cool = slide::COOLDOWN;
+        self.tracker.stop();
     }
 
     /// Agarrarse a una repisa y subir. Devuelve si el mantle manda este tick (entonces no hay

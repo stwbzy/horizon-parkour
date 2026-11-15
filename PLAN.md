@@ -1,6 +1,6 @@
 # Parkour — mod de parkour cinemático para Horizon (Minecraft 26.3 en Rust)
 
-Fecha: 2026-11-14 · Estado: fases 0 a 3 hechas (esqueleto, sensores, aterrizaje y roll, mantle y hang); siguiente: fase 4 (vault y slide)
+Fecha: 2026-11-14 · Estado: fases 0 a 4 hechas (esqueleto, sensores, aterrizaje y roll, mantle y hang, vault y slide); siguiente: fase 5 (wall-run y wall jump)
 Mod hermano de `~/Proyectos/horizon-armas` (Arsenal): misma instancia, mismas rutas, mismo flujo de build.
 
 ## 1. Rutas y base técnica (reutilizado de Arsenal)
@@ -203,6 +203,25 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
 - Vanilla sigue contando los bloques caídos antes del agarre y los cobraría al pisar la repisa: mientras dura el
   mantle se avisa `Landing::Grab` (daño ×0), igual que los aterrizajes.
 - Pendiente: colgarse de repisas sin sitio encima (el sensor no las da) y shimmy lateral.
+
+### Notas de la fase 4
+- Sensor `sense::obstacle`: cara a ≤ 1 bloque delante, borde entre la altura de escalón y 1.55 (vallas), sitio
+  libre por encima al menos agachado (1.5) en todo el camino. Fino (fondo ≤ 1.5) = se pasa al otro lado; hondo =
+  se acaba encima. `crouch` si de pie no cabe (ventanas).
+- Vault (`vault.rs`): saltar corriendo (≥ 0.25 b/t, mirando ≤ 45°) desde el suelo o en los 3 primeros ticks de
+  un salto. Se empieza en `movement_input` para quitar el salto de vanilla. Controlador de velocidad como el
+  mantle: sube (≤ 0.42 b/t) llegando a la cara justo al pasar el borde y luego avanza a la velocidad de la
+  carrera (0.28–0.4) hasta quedar pasado; suelta con la inercia.
+- Slide (`slide.rs`): en suelo, corriendo (≥ 0.26) y **recién pulsado** agacharse. Sale a ×1.45 la velocidad
+  (máx. 0.5) y frena ×0.955 por tick: unos 5 bloques en ~1 s. Sigue la dirección de la carrera, no la vista.
+  Acaba al soltar agacharse (tras 8 ticks), al chocar, al quedarse 3 ticks sin suelo o con la velocidad baja.
+  Saltar = slide-jump (salto de sprint con la inercia). 10 ticks de espera entre slides.
+- El agachado de vanilla se anula durante el slide (si no, el borde de los bloques frenaría al jugador, como al
+  andar agachado); sólo se fuerza con techo bajo encima o delante (`sense::low_ceiling`), para caber por huecos
+  de 1.5.
+- Mientras el mod mueve al jugador en vault y slide, el avance se deja en 0.01: cuenta como "adelante" y el juego
+  no le quita el sprint (vanilla lo quita sin avance).
+- El rozamiento del suelo se supone normal (0.6): en hielo el slide va más lejos.
 
 ## 9. Riesgos y mitigaciones
 - **Anticheat/vanilla del servidor** corrige movimientos agresivos → velocidades conservadoras, impulsos cortos y configurables.

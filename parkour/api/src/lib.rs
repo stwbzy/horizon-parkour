@@ -4,9 +4,10 @@
 //! Reglas de compatibilidad: los efectos de cámara, FOV y manos se suman a los de otros mods,
 //! nunca los reemplazan; no hay teclas propias (todo es contextual con salto, sprint y agacharse).
 //!
-//! Hecho hasta la fase 3 (ver PLAN.md): seguimiento del jugador, sensores, HUD de depuración,
-//! ajustes, el aterrizaje (correr, agacharse o rodar al caer quita daño de caída) y el mantle
-//! (agarrarse a una repisa en el aire y subir a pulso, o quedarse colgado).
+//! Hecho hasta la fase 4 (ver PLAN.md): seguimiento del jugador, sensores, HUD de depuración,
+//! ajustes, el aterrizaje (correr, agacharse o rodar al caer quita daño de caída), el mantle
+//! (agarrarse a una repisa en el aire y subir a pulso, o quedarse colgado), el vault (saltar
+//! corriendo un obstáculo bajo) y el slide (agacharse corriendo para deslizarse).
 
 pub mod cinematic;
 pub mod config;
@@ -14,7 +15,9 @@ pub mod land;
 pub mod mantle;
 pub mod net;
 pub mod sense;
+pub mod slide;
 pub mod state;
+pub mod vault;
 
 mod client;
 mod server;
