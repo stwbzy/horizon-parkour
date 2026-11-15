@@ -1,6 +1,6 @@
 # Parkour — mod de parkour cinemático para Horizon (Minecraft 26.3 en Rust)
 
-Fecha: 2026-11-14 · Estado: fase 0 hecha (esqueleto, build, HUD de depuración); siguiente: fase 1 (sensores)
+Fecha: 2026-11-14 · Estado: fases 0 y 1 hechas (esqueleto, HUD de depuración, sensores); siguiente: fase 2 (aterrizaje y roll)
 Mod hermano de `~/Proyectos/horizon-armas` (Arsenal): misma instancia, mismas rutas, mismo flujo de build.
 
 ## 1. Rutas y base técnica (reutilizado de Arsenal)
@@ -168,6 +168,14 @@ Recomendación de v1: 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + slide + wall jump + ledge ha
   `entity_is_sprinting`, `entity_bounding_box`) o quedarse con la deducción.
 - El `.hmod` de contenido sólo se empaqueta cuando `content/` tenga assets (fase 6).
 - `ref/` (ignorado por git) guarda la API generada (`mod_api_generated.rs`, Host) para consultar firmas.
+
+### Notas de la fase 1
+- Los sensores (`sense.rs`) salen sólo de `block_collision`: suelo, paredes izq/der/frente (≥ 2 bloques, por
+  encima de la altura de escalón 0.6), repisa (borde ≤ 3.3 sobre los pies, con sitio de pie o agachado y hueco
+  libre para subir), techo y vacío bajo los pies. No hace falta el `EntityRef` del jugador: el suelo también es
+  geométrico, así que la deducción por velocidad vertical de la fase 0 desaparece.
+- Las cajas se piden una vez por bloque y tick (cache en `client.rs`).
+- Las normales de pared están alineadas a ejes (la cara del bloque tocado).
 
 ## 9. Riesgos y mitigaciones
 - **Anticheat/vanilla del servidor** corrige movimientos agresivos → velocidades conservadoras, impulsos cortos y configurables.

@@ -4,10 +4,11 @@
 //! Reglas de compatibilidad: los efectos de cámara, FOV y manos se suman a los de otros mods,
 //! nunca los reemplazan; no hay teclas propias (todo es contextual con salto, sprint y agacharse).
 //!
-//! Fase 0: esqueleto. Sigue al jugador local, lo muestra en un HUD de depuración y registra el
-//! mod y sus ajustes en Options > Mods. Ver PLAN.md.
+//! Fases 0 y 1: sigue al jugador local, lee los sensores (suelo, paredes, repisas), lo muestra en
+//! un HUD de depuración y registra el mod y sus ajustes en Options > Mods. Ver PLAN.md.
 
 pub mod config;
+pub mod sense;
 pub mod state;
 
 mod client;
@@ -61,7 +62,7 @@ impl Hooks for Parkour {
 
     fn player_logged_in(&self, host: &mut dyn Host, event: &mut PlayerLoggedInEvent<'_>) {
         let line = format!(
-            "[Parkour {}] cargado (fase 0: sin movimientos aún). HUD de depuración en Options > Mods.",
+            "[Parkour {}] cargado (sin movimientos aún). HUD de depuración en Options > Mods.",
             env!("CARGO_PKG_VERSION"),
         );
         host.tell(event.player, Text::literal(line));
